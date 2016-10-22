@@ -6,10 +6,10 @@ import requests
 USER_AGENT="audioBookGuide v1.0"
 TARGET_SUB="audiobooksonyoutube"
 
-GOODREADS_KEY="3ZX3eKumhjFTlIUsYBJtsg"
-GOODREADS_SECRET="cH9WQkEmYATPuMVOyTE1MhjlHz7x1BOts8a6HlgrQ"
+GOODREADS_KEY=""
+GOODREADS_SECRET=""
 
-YOUTUBE_KEY="AIzaSyAU-CPud5OxIh_IeGXTN6JwcoLRDTQ02rk"
+YOUTUBE_KEY=""
 
 
 '''	Parse the newest submissions in the target sub. Return each
