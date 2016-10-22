@@ -6,10 +6,10 @@ import requests
 USER_AGENT="audioBookGuide v1.0"
 TARGET_SUB="audiobooksonyoutube"
 
-GOODREADS_KEY=""
-GOODREADS_SECRET=""
+GOODREADS_KEY="3ZX3eKumhjFTlIUsYBJtsg"
+GOODREADS_SECRET="cH9WQkEmYATPuMVOyTE1MhjlHz7x1BOts8a6HlgrQ"
 
-YOUTUBE_KEY=""
+YOUTUBE_KEY="AIzaSyAU-CPud5OxIh_IeGXTN6JwcoLRDTQ02rk"
 
 
 '''	Parse the newest submissions in the target sub. Return each
@@ -54,10 +54,10 @@ def get_video_id(url):
 	if '.be' in url:
 		start = url.find('.be/') + 4
 		return url[start:]
+	
+	# Hande playlist links.
 	if '?list=' in url:
-		print 'PLAYLIST'
 		start = url.find('?list=') + 6
-		print url[start:]
 		return url[start:]
 	
 	return url[start:end]
@@ -86,21 +86,31 @@ def get_book_data(url):
 	
 	r = requests.get(url)
 	xml = xmltodict.parse(r.text)
-
+	
 	# Gather Book metadata.
+	data		= {}
 	book_data 	= xml['GoodreadsResponse']['book']
 	title 		= book_data['title']
 	author		= book_data['authors']['author']['name']
 	date		= book_data['publication_year'], \
 			  	book_data['publication_month'], \
 			  	book_data['publication_day']
-	description	= book_data['description']
+	description	= strip_html(book_data['description'])
 	rating		= book_data['average_rating']
 
 	print title
 	print author
 	print description
 	print date, rating
+
+
+'''	Remove HTML tags in the given string. '''
+def strip_html(string):
+
+	import re
+	
+	html_cleaner = re.compile('<.*?>')
+	return re.sub(html_cleaner, '', string)
 
 
 '''	Create valid query URLS for the Youtube API, using video IDs. '''
@@ -138,15 +148,36 @@ def get_audio_data(url):
 		We can convert this using the 'isodate' library. '''
 	def convert_iso(duration):
 		import isodate
-		return isodate.parse_duration(iso_duration)
+		return isodate.parse_duration(duration)
 
 	return convert_iso(iso_duration)
 
 
+'''	Submit a comment to the thread with the given text body. '''
+def format_comment(body):
+
+	header 		= "# " + title + '\n'
+	metadata	= "`Author`: " + author + "    " + \
+			  "`Date of Publication`: " + pub_date + '\n' + \
+			  "`Audio Runtime` *is* " + run_time + ". " + \
+			  "*Tagged in* `" + tag[0] + "`, `" + \
+			  tag[1] + "`, `" + tag[2] + "`" + '\n'
+	rating		= "`Average Rating` **" + rating + "/5**"
+	linebreak	= '&nbsp;'
+	description	= ">" + description + "\n"
+	#linebreak after description.
+	footer		= "[source code](https://github.com/tallosan/reddit-bots/tree/master/AudioBookGuide).  [send me feedback.](https://www.reddit.com/user/AudioBookGuidev1)"
+
+	return header + metadata + rating + linebreak + \
+	       description + linebreak + \
+	       footer
+
+
 titles, ids 	= parse_submissions(TARGET_SUB)
-print ids[5]
+print titles[1], ids[1]
 gr_links 	= linkify(titles)
 yt_links	= linkify_youtube(ids)
-book		= get_book_data(gr_links[5])
-print get_audio_data(yt_links[5])
+print gr_links[1]
+book		= get_book_data(gr_links[1])
+print get_audio_data(yt_links[1])
 
