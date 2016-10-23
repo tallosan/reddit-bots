@@ -1,15 +1,11 @@
 import praw
 from time import sleep
 import requests
+from collections import deque
 
 
 USER_AGENT="audioBookGuide v1.0"
 TARGET_SUB="audiobooksonyoutube"
-
-GOODREADS_KEY=""
-GOODREADS_SECRET=""
-
-YOUTUBE_KEY=""
 
 
 '''	Parse the newest submissions in the target sub. Return each
@@ -88,20 +84,20 @@ def get_book_data(url):
 	xml = xmltodict.parse(r.text)
 	
 	# Gather Book metadata.
-	data		= {}
+	body		= {}
 	book_data 	= xml['GoodreadsResponse']['book']
-	title 		= book_data['title']
-	author		= book_data['authors']['author']['name']
-	date		= book_data['publication_year'], \
-			  	book_data['publication_month'], \
+	body['title'] 	= book_data['title']
+	body['author']	= book_data['authors']['author']['name']
+	body['date']	= str(book_data['publication_year']) + ', ' + \
+			  	book_data['publication_month'] + ', ' + \
 			  	book_data['publication_day']
-	description	= strip_html(book_data['description'])
-	rating		= book_data['average_rating']
+	body['desc']	= strip_html(book_data['description'])
+	body['tags']	= book_data['popular_shelves']['shelf'][2]['@name'], \
+			  book_data['popular_shelves']['shelf'][3]['@name'], \
+			  book_data['popular_shelves']['shelf'][4]['@name']
+	body['rating']	= book_data['average_rating']
 
-	print title
-	print author
-	print description
-	print date, rating
+	return body
 
 
 '''	Remove HTML tags in the given string. '''
@@ -150,34 +146,46 @@ def get_audio_data(url):
 		import isodate
 		return isodate.parse_duration(duration)
 
-	return convert_iso(iso_duration)
+	return str(convert_iso(iso_duration))
 
 
 '''	Submit a comment to the thread with the given text body. '''
 def format_comment(body):
 
-	header 		= "# " + title + '\n'
-	metadata	= "`Author`: " + author + "    " + \
-			  "`Date of Publication`: " + pub_date + '\n' + \
-			  "`Audio Runtime` *is* " + run_time + ". " + \
-			  "*Tagged in* `" + tag[0] + "`, `" + \
-			  tag[1] + "`, `" + tag[2] + "`" + '\n'
-	rating		= "`Average Rating` **" + rating + "/5**"
-	linebreak	= '&nbsp;'
-	description	= ">" + description + "\n"
-	#linebreak after description.
-	footer		= "[source code](https://github.com/tallosan/reddit-bots/tree/master/AudioBookGuide).  [send me feedback.](https://www.reddit.com/user/AudioBookGuidev1)"
+	header 		= "# " + body['title'] + " (" +\
+			  body['date'].split(',')[0] + ")\n"
+	metadata	= "`Author`: " + body['author'] + "    " + \
+			  "`Date of Publication`: " + body['date'] + '\n\n' + \
+			  "`Audio Runtime` *is* " + body['run_time'] + ". " + \
+			  "*Tagged in* `" + body['tags'][0] + "`, `" + \
+			  body['tags'][1] + "`, `" + body['tags'][2] + "`" + '\n\n'
+	rating		= "`Average Rating` **" + body['rating'] + "/5**\n\n"
+	description	= ">" + body['desc'] + "\n\n"
+	footer		= "  [source code.](https://github.com/tallosan/reddit-bots/tree/master/AudioBookGuide)  [send me feedback.](https://www.reddit.com/user/AudioBookGuidev1)"
 
-	return header + metadata + rating + linebreak + \
-	       description + linebreak + \
+	return header + \
+	       metadata + rating + \
+	       description + \
 	       footer
 
 
+CACHE_SIZE=10
+cache = deque(maxlen=CACHE_SIZE)
+
+
 titles, ids 	= parse_submissions(TARGET_SUB)
-print titles[1], ids[1]
 gr_links 	= linkify(titles)
 yt_links	= linkify_youtube(ids)
-print gr_links[1]
 book		= get_book_data(gr_links[1])
-print get_audio_data(yt_links[1])
+book['run_time'] = get_audio_data(yt_links[1])
+comment = format_comment(book)
+print comment
+
+r = praw.Reddit(user_agent=USER_AGENT)
+#LOGIN WITH PRIVATE INFO.
+sub	= r.get_subreddit('testingground4bots')
+sub = sub.get_new()
+thread= next(sub)
+thread.add_comment(comment)
+
 
