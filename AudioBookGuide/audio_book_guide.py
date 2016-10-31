@@ -1,3 +1,12 @@
+'''				
+				AudioBookGuide.
+
+	Reddit Bot that provides a bit of background (description, audio
+	run-time, tags, etc.) on any new audio books in r/audiobooksonyoutube. I
+	created this mainly for pedagogical reasons.
+
+'''
+
 import praw
 from time import sleep
 import requests
@@ -7,6 +16,9 @@ import cPickle as pickle
 
 USER_AGENT="audioBookGuide v1.0"
 TARGET_SUB="audiobooksonyoutube"
+
+#GOODREADS_KEY=YOUR GOODREADS API KEY
+#YOUTUBE_KEY=YOUR YOUTUBE API KEY
 
 
 '''	Parse the newest submissions in the target sub. Return a list of
@@ -49,15 +61,14 @@ def get_video_id(url):
 	# Handle 'youtu.be' links.
 	if '.be' in url:
 		start = url.find('.be/') + 4
-		return url[start:]
 	
 	# Hande playlist links.
-	if '?list=' in url:
+	elif '?list=' in url:
 		start = url.find('?list=') + 6
-		return url[start:]
 	
-	start = url.find('v=') + 2
-	#end = url.find('&')
+	# Assume standard Youtube format.
+	else:
+		start = url.find('v=') + 2
 	
 	return url[start:]
 
@@ -183,12 +194,18 @@ def format_comment(body):
 	       footer
 
 
+# Log into Reddit as the bot.
+r = praw.Reddit(user_agent=USER_AGENT)
+r.login("AudioBookGuidev1", "YOUR REDDIT PASSWORD", disable_warning=True)
+subreddit = r.get_subreddit(TARGET_SUB)
+
 # Cache parameters. The cache is necessary as we do not want to post in the
 # same thread each cycle.
 CACHE_SIZE=50
 CACHE_FNAME='abg-cache.pickle'
 
-# Load the cache. If none exists, create a new one.
+# Load the cache. If none exists, create a new one. We're using cPickle to
+# serialize.
 try:
 	with open(CACHE_FNAME, 'rb') as fp:
 		cache = pickle.load(fp)
@@ -196,14 +213,9 @@ except EOFError as eof_error:
 	cache = deque(maxlen=CACHE_SIZE)
 	print str(eof_error) + ": creating a new cache."
 
-# Log into Reddit as the bot.
-r = praw.Reddit(user_agent=USER_AGENT)
-subreddit = r.get_subreddit(TARGET_SUB)
 
-# Run once every 3 minutes, commenting on any new, properly formatted, threads.
 while True:
 	
-	print "starting cycle."
 	subs = parse_submissions(subreddit)
 	threads, titles, ids = [], [], []
 	for sub in subs:
@@ -212,19 +224,16 @@ while True:
 			titles.append(sub['title']), ids.append(sub['vid_id'])
 			cache.append(sub['id'])
 	
-	print str(len(cache)) + ' occupants: ' + str(cache)
 	gr_links = linkify(titles)
 	yt_links = linkify_youtube(ids)
 	bad =[]	
+	
 	# Create a Reddit comment from the available book and video data.
 	for thread, gr_link, yt_link in zip(threads, gr_links, yt_links):
-		print gr_link
 		book = get_book_data(gr_link)
 		if book:
 			book['run_time'] = get_audio_data(yt_link)
 			comment = format_comment(book)
-			print 'adding comment to ...\n' + gr_link + '\n'
-			print comment
 			
 			# Attempt to post the comment. Remember to update cache.
 			posted = False
@@ -235,16 +244,9 @@ while True:
 						pickle.dump(cache, fp)
 					posted = True
 				except Exception: 
-					print "rate limit exceeded. \
-							going to sleep ..."
 					sleep(120)
 		else:
 			bad.append(gr_link)
-			print '\ninvalid book. ' + gr_link
 		
-		print '\ncomment added.'
-	
-	print '\nfinished cycle.'
-	print '\n', len(bad), bad
-	sleep(600)
+	sleep(2400)
 
