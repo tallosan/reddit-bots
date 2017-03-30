@@ -76,13 +76,22 @@ class Match(object):
                                 'article[1]/div/div[1]/div/div/div/table/tbody[1]')[0]
                 h_subs   = tree.xpath('//*[@id="main-container"]/div/div/div[1]/'
                                 'article[1]/div/div[1]/div/div/div/table/tbody[2]')[0]
-                a_lineup = tree.xpath('//*[@id="main-container"]/div/div/div[1]/'
-                                      'article[1]/div/div[2]/div')[0]
+		a_lineup = tree.xpath('//*[@id="main-container"]/div/div/div[1]/'
+				'article[1]/div/div[2]/div/div/div/table/tbody[1]')[0]
+		a_subs	 = tree.xpath('//*[@id="main-container"]/div/div/div[1]/'
+				'article[1]/div/div[2]/div/div/div/table/tbody[2]')[0]
 
                 self.home_team['starters'] = self.get_lineup(h_lineup)
-
-                print self.home_team
-  		print self.away_team
+                self.home_team['subs'] 	   = self.get_lineup(h_subs)
+		self.away_team['starters'] = self.get_lineup(a_lineup)
+		self.away_team['subs']	   = self.get_lineup(a_subs)
+                print self.home_team['starters']
+                print
+                print self.home_team['subs']
+		print
+  		print self.away_team['starters']
+                print
+  		print self.away_team['subs']
                 print
 
         def create_thread(self):
@@ -111,19 +120,28 @@ class Match(object):
         '''
         def get_lineup(self, lineup_element):
 
-                # N.B -- We need to traverse the tree to get each row.
+                # Go through each row and extract the player data. N.B -- We need
+		# to traverse the tree to get each row.
                 players = []
                 for e in lineup_element.getchildren():
-                        row     = e.getchildren()[0].getchildren()[0].getchildren()[0]
+			
+			# ESPN occasionally screws up the last row in the div, so
+			# we need to handle this.
+			try:
+				row = e.getchildren()[0].\
+				        getchildren()[0].\
+					getchildren()[0]
+				
+				# Parse the player's number, then their name and position.
+				number = row.getchildren()[1].text_content()
+				player = row.getchildren()[2].text_content().split(',')
+				name   = player[0]
+				pos    = player[1][1:].split(' ')[0]
 
-                        # Parse the player's number, then their name and position.
-                        number  = row.getchildren()[1].text_content()
-
-                        player  = row.getchildren()[2].text_content().split(',')
-                        name    = player[0]
-                        pos     = player[1][1:].split(' ')[0]
-
-                        players.append( (number, name, pos) )
+				players.append( (number, name, pos) )
+			
+			except IndexError:
+				pass
 
                 return players
 
