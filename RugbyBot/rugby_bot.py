@@ -21,14 +21,15 @@ class Scheduler(object):
 
 	''' Create a scheduler.
 	    Args:
+	    	subreddit_name: The name of the target subreddit.
 	    	cache_size: The size of our match cache.
 		*url: The URL to get the match data from.
 	'''
-	def __init__(self, cache_size=20, url='http://www.espn.co.uk'):
+	def __init__(self, subreddit_name, cache_size, url='http://www.espn.co.uk'):
 		
 		self.base_url 	   = url
 		self.url 	   = self.base_url + '/rugby/scoreboard'
-		
+		self.target_sub	   = r.subreddit(subreddit_name)
 		self.cache	   = deque(maxlen=cache_size)
 
 	''' Wrapper for _run_scheduler(). Runs the scheduler and polls according
@@ -43,6 +44,8 @@ class Scheduler(object):
 		while True:
 			#schedule.run_pending()
 			self._run_scheduler()
+			print 'cycle complete.'
+			time.sleep(10)
 	
 	''' Run the scheduler to determine which match threads need to
 	    be created. '''
@@ -51,12 +54,17 @@ class Scheduler(object):
 		# Perform an update on the match thread (assuming the match is already
 		# posted and is active), or create a new match thread.
 		self.get_matches(self.url)
+		print self.cache
 		for match in self.cache:
+			match = self.cache[2]
 			if match.is_posted and match.is_active:
 				match.update_thread()
+				print 'UPDATE 200: ', match
 			elif not match.is_posted:
-				match.post_thread()
-			lkjasd;
+				match.post_thread(target_sub=self.target_sub)
+				print 'POST 200: ', match
+			print match.post
+			time.sleep(10)
 
 	''' Returns a list of Match objects that are not currently in the
 	    scheduler's cache.
@@ -85,6 +93,7 @@ class Match(object):
         def __init__(self, url):
 
                 self.url = url
+		self.sub = 'bottesting'
 
                 # Match data.
 		self.competition = None
@@ -102,10 +111,13 @@ class Match(object):
 		self.is_active	 = False
 
                 # Initialize static fields, and get current dynamic fields.
-		self.parse_gamethread(self.url)
+		self.parse_gamethread()
  
- 	''' Create a thread for this Match. '''
-	def post_thread(self):
+ 	''' Create a thread for this Match.
+	    Args:
+	    	target_sub: A praw.models.subreddit instance to post our submission to.
+	'''
+	def post_thread(self, target_sub):
                 
 		# Thread title.
 		self.thread['title'] = "Match Thread: " + \
@@ -121,58 +133,65 @@ class Match(object):
 		
 		# Lineups: Starters, then Replacements.
 		self.thread['lineups'] = "## **Starting Lineups**:\n\n"
-		self.thread['lineups'] += "**Player** | **Position** ""| " + \
-					  "**Player** | **Position**\n"
-		self.thread['lineups'] += ":-|:-|:-|:-\n"
+		self.thread['lineups'] += "**" + self.home_team['name'] + "**" + \
+					  " | **Position** ""| " + \
+					  "**" + self.away_team['name'] + "**\n"
+		self.thread['lineups'] += ":-|:-|:-\n"
 		for h_player, a_player in zip(self.home_team['starters'],
 					      self.away_team['starters']):
-			self.thread['lineups'] += h_player[0] + '   ' + h_player[1] + \
-						  ' | ' + h_player[2]  + ' | '
-			self.thread['lineups'] += a_player[0] + '   ' + a_player[1] + \
-						  ' | ' + a_player[2] + '\n'
-		self.thread['lineups'] += "\n## **Replacements**\n"
-		self.thread['lineups'] += "**Player** | **Position** | " + \
-					  "**Player** | **Position**\n"
-		self.thread['lineups'] += ":-|:-|:-|:-\n"
+			self.thread['lineups'] += str(h_player[0]) + ' .  ' + \
+						  h_player[1] + ' | ' + h_player[2] + ' | '
+			self.thread['lineups'] += str(a_player[0]) + '.   ' + \
+						  a_player[1] + '\n'
+		self.thread['lineups'] += "\n## **Replacements**:\n"
+		self.thread['lineups'] += "**" + self.home_team['name'] + "**" + \
+					  " | **Position** ""| " + \
+					  "**" + self.away_team['name'] + "**\n"
+		self.thread['lineups'] += ":-|:-|:-\n"
 		for h_sub, a_sub in zip(self.home_team['subs'], self.away_team['subs']):
-			self.thread['lineups'] += h_sub[0] + '   ' + h_sub[1] + \
-						  ' | ' + h_sub[2]  + ' | '
-			self.thread['lineups'] += a_sub[0] + '   ' + a_sub[1] + \
-						  ' | ' + a_sub[2] + '\n'
+			self.thread['lineups'] += str(h_sub[0]) + '.   ' + \
+						  h_sub[1] + ' | ' + h_sub[2]  + ' | '
+			self.thread['lineups'] += str(a_sub[0]) + '.   ' + a_sub[1] + '\n'
 		self.thread['lineups'] += '\n\n----\n\n'
 		
 		# Match Events.
 		self.thread['events'] = self.format_events()
 		
+		print self.thread['header'] + self.thread['venue'] + \
+			      	     	 self.thread['lineups'] + self.thread['events']
+		dslkj;
+
 		# Post the thread, and update the posted flag.
-		self.post = r.submit(target_sub,
+		self.post = target_sub.submit(
 				title=self.thread['title'],
-			 	body=self.thread['header'] + self.thread['venue'] + \
-			      	self.thread['lineups'] + self.thread['events']
+			 	selftext=self.thread['header'] + self.thread['venue'] + \
+			      	     	 self.thread['lineups'] + self.thread['events']
 		)
 		
 		self.is_posted = True
+		self.is_active = True
 
 	''' Update the Match thread. N.B. -- We only need to update the dynamic
 	    values here. '''
 	def update_thread(self):
 
-                request = requests.get(url)
+                request = requests.get(self.url)
                 tree = html.fromstring(request.content)
 
 		# Get the current score.
 		self.home_team['score'], self.away_team['score'] = self.get_score(tree)
 		self.game_time = self.get_time(tree)
-		self.thread['header'] = format_header()
+		self.thread['header'] = self.format_header()
 
 		self.events = self.get_events(tree)
 		self.thread['events'] = self.format_events()
 
 		# Perform the update.
-		self.post.edit(text=self.thread['header'] + self.thread['venue'] + \
-			      	    self.thread['lineups'] + self.thread['events']
+		self.post = self.post.edit(
+				body=self.thread['header'] + self.thread['venue'] + \
+			      	     self.thread['lineups'] + self.thread['events']
 		)
-	
+
 	''' Format the thread header using Markdown syntax. '''
 	def format_header(self):
 		
@@ -197,15 +216,13 @@ class Match(object):
 	    data is parsed and set in this function. We leave any dynamic data
 	    parsing to helper functions, as we'll need to use these throughout the
 	    Match object's life.
-            Args:
-                url: The URL of the site to parse.
         '''
-        def parse_gamethread(self, url):
+        def parse_gamethread(self):
 
-                request = requests.get(url)
+                request = requests.get(self.url)
                 tree = html.fromstring(request.content)
 
-                # Get the competition name.
+                # Get the competition and venue names.
                 competition = tree.xpath('//*[@id="custom-nav"]/header/div[1]')[0]
                 self.competition = competition.text_content()
 
@@ -218,8 +235,8 @@ class Match(object):
                                      '/div[1]/div/div[2]/div/div/a/span[2]')[0]
                 a_team  = tree.xpath('//*[@id="custom-nav"]/header/div[2]'
                                      '/div[3]/div/div[3]/div/div/a/span[2]')[0]
-               
-                self.home_team['name']  = h_team.text_content()
+                
+		self.home_team['name']  = h_team.text_content()
 		self.home_team['flair'] = '[] (#' + self.home_team['name'].lower() + ')'
                 self.away_team['name']  = a_team.text_content()
 		self.away_team['flair'] = '[] (#' + self.away_team['name'].lower() + ')'
@@ -235,7 +252,6 @@ class Match(object):
                 a_tries = tree.xpath('//*[@id="custom-nav"]/div[1]/div/div/'
                                        'div[2]/div')[0]
 
-		#print tree.xpath('//*[@id="custom-nav"]/div[1]/div/div/div[1]/div/ul[1]')[0].text_content().split(')')
                 self.home_team['tries'] = self.get_tries(h_tries)
                 self.away_team['tries'] = self.get_tries(a_tries)
 
@@ -253,9 +269,20 @@ class Match(object):
                 self.home_team['subs'] 	   = self.get_lineup(h_subs)
 		self.away_team['starters'] = self.get_lineup(a_lineup)
 		self.away_team['subs']	   = self.get_lineup(a_subs)
-
+		
 		# Get events.
 		self.events = self.get_events(tree)
+		print self.events[:10]
+		lkjsd;
+
+	def get_flair(self):
+
+		flairs_url = 'https://www.reddit.com/r/rugbyunion/wiki/inlineflair.json'
+		flair_request = requests.get(flairs_url)
+		import json
+		flairs = json.load(flair_request.content)
+		print flairs
+		print flairs['content_md']
 
 	''' Get the current score, and return a tuple like so: (home score, away score)
 	    Args:
@@ -325,9 +352,13 @@ class Match(object):
 				pos    = player[1].strip()
 			
 			finally:
-				players.append( (number, name, pos) )
+				players.append( (int(number), name, pos) )
+		
+		# Ensure that players are sorted in ascending order by number.
+		from operator import itemgetter
+		players.sort(key=itemgetter(0))
 
-                return players
+		return players
 
 	''' Get all key events during the match.
 	    Args:
@@ -335,10 +366,16 @@ class Match(object):
 	'''
 	def get_events(self, tree):
 		
-		e_href	   = tree.xpath('//*[@id="main-container"]/div/div/div[2]'
+		# Get the URL of the events page. N.B. -- The XPath of this element
+		# changes from time to  time, so we need to handle this.
+		try:
+			e_href = tree.xpath('//*[@id="main-container"]/div/div/div[2]'
 				    '/article[2]/footer/a')[0].get('href')
-		events_url = self.url.split('/rugby/match?')[0] + e_href
+		except IndexError:
+			e_href = tree.xpath('//*[@id="main-container"]/div/div/div[2]'
+				     '/article[1]/footer/a')[0].get('href')
 
+		events_url     = self.url.split('/rugby/match?')[0] + e_href
 		events_request = requests.get(events_url)
 		events_tree    = html.fromstring(events_request.content)
 
@@ -351,26 +388,20 @@ class Match(object):
 		][::-1]
 
 
-URL = 'http://www.espn.co.uk/rugby/match?gameId=290096&league=267979'
-
-scheduler = Scheduler()
-scheduler.run_scheduler(poll_interval=30)
-
-laskdj;
 # ========================================================================
 
-USER_AGENT = 'RugbyUnionBot'
-USERNAME   = 'RugbyUnionBot'
-PASSWORD   = 'rugbyunionbot1234'	# Dummy password.
+r = praw.Reddit(client_id=CLIENT_ID,
+		client_secret=CLIENT_SECRET,
+		user_agent=USER_AGENT,
+		username=USERNAME,
+		password=PASSWORD
+)
 
-POLL_INTERVAL = 30
-
-r = praw.Reddit(user_agent=USER_AGENT)
-r.login(username=USERNAME, password=PASSWORD, disable_warning=True)
-
+CACHE_SIZE     = 20
+POLL_INTERVAL  = 30
 
 if __name__=='__main__':
         
-	scheduler = Scheduler(cache_size=20)
+	scheduler = Scheduler(subreddit_name=SUBREDDIT_NAME, cache_size=CACHE_SIZE)
 	scheduler.run_scheduler(poll_interval=POLL_INTERVAL)
 
