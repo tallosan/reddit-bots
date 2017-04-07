@@ -9,8 +9,14 @@ import praw
 import requests
 from lxml import html
 
-import schedule
 import time
+
+from datetime import datetime
+
+import dateutil
+import dateutil.parser as date_parser
+
+from operator import itemgetter
 
 from collections import deque
 
@@ -30,6 +36,7 @@ class Scheduler(object):
 		self.base_url 	   = url
 		self.url 	   = self.base_url + '/rugby/scoreboard'
 		self.target_sub	   = r.subreddit(subreddit_name)
+
 		self.cache	   = deque(maxlen=cache_size)
 
 	''' Wrapper for _run_scheduler(). Runs the scheduler and polls according
@@ -37,15 +44,50 @@ class Scheduler(object):
 	    Args:
 	    	poll_interval: The interval between polls.
 	'''
-	def run_scheduler(self, poll_interval):
+	def run_scheduler(self, hours_before):
 		
 		# Set a Cron job.
-		#schedule.every(poll_interval).minutes.do(self._run_scheduler)
 		while True:
-			#schedule.run_pending()
-			self._run_scheduler()
+			interval = self.get_interval()
+			interval[0].hours -= hours_before
+			interval[1].hours += hours_before + 1
+			
+			print 'sleeping for ', interval[0].days, ' days, ',\
+				interval[0].hours, ' hours and ',\
+				interval[0].minutes, ' minutes.'
+			
+			# Determine the number of seconds until the next game, and
+			# sleep for them.
+			interval_open = ((interval[0].hours * 60) * 60) +\
+					 (interval[0].minutes * 60) +\
+					  interval[0].seconds
+			time.sleep(interval_open)
+			
+			# When we wake up, calculate the interval time and run
+			# our program until it is up.
+			interval_time = \
+				  ((interval[1].hours - interval[0].hours) * 60) *60\
+				+ ((interval[1].minutes - interval[0].minutes) * 60)\
+				+ ((interval[1].seconds) - interval[0].seconds)
+
+			print 'running for ', interval_time / 60 / 60, ' hours.'
+			while time.time() < interval_time:
+				try:
+					self._run_scheduler()
+				except Exception:
+					pass
+				
+				time.sleep(30)
+
+			# Determine the amount of time until midnight, and then sleep
+			# until then before restarting the cycle all over again.
+			minutes_left = (60 * interval[1].hours) + interval[1].minutes
+			time_to_midnight = (24*60) - minutes_left
+
 			print 'cycle complete.'
-			time.sleep(10)
+			print 'sleeping for ', time_to_midnight, ' minutes.'
+			
+			time.sleep(time_to_midnight)
 	
 	''' Run the scheduler to determine which match threads need to
 	    be created. '''
@@ -54,7 +96,6 @@ class Scheduler(object):
 		# Perform an update on the match thread (assuming the match is already
 		# posted and is active), or create a new match thread.
 		self.get_matches(self.url)
-		print self.cache
 		for match in self.cache:
 			match = self.cache[2]
 			if match.is_posted and match.is_active:
@@ -63,9 +104,7 @@ class Scheduler(object):
 			elif not match.is_posted:
 				match.post_thread(target_sub=self.target_sub)
 				print 'POST 200: ', match
-			print match.post
-			time.sleep(10)
-
+		
 	''' Returns a list of Match objects that are not currently in the
 	    scheduler's cache.
 	'''
@@ -77,13 +116,60 @@ class Scheduler(object):
 		# Get the relative match URLs, and create full URLs. If the URL
 		# does not belong to a Match already in our cache then we can add it.
 		schedule = tree.xpath('//a[@class="competitors"]')
-		matches  = []
+		
+		# Append a Match to our cache iff it hasn't already been added, and is
+		# ready to be added.
 		for match in schedule:
 			match_url = self.base_url + match.get('href')
 			if not any((match.url == match_url) for match in self.cache):
 				self.cache.append(
 						Match(self.base_url + match.get('href'))
 				)
+
+	''' Get the next interaval to run on. '''
+	def get_interval(self):
+		
+		request = requests.get(self.url)
+		tree = html.fromstring(request.content)
+	
+		# Get the dates and times for all games on the next match day.
+		dates	 = tree.xpath('//span[@class="game-date"]')
+		times	 = tree.xpath('//span[@class="game-time"]')
+		dts	 = [
+				[date.text_content(), time.text_content()]
+				for date, time in zip(dates, times)
+		]
+
+		# Now sort them by time (we assume the day is the same).
+		for dt in dts: dt[1] = date_parser.parse(dt[1])
+		dts.sort(key=itemgetter(1))
+
+		# Get the opening and closing endpoints, and format them.
+		a_endpoint = dts[0]
+		b_endpoint = dts[-1]
+
+		return [ self.format_endpoint(a_endpoint[0], a_endpoint[1]), 
+		         self.format_endpoint(b_endpoint[0], b_endpoint[1]) ]
+
+	''' Returns a relativedelta object which represents the amount of time
+	    before the given date and time.
+	    Args:
+	    	date: A list containing the month and day.
+		time: A datetime object containing the match time.
+	'''
+	def format_endpoint(self, date, time):
+
+		# Get the number of months and days until the match.
+		date = date.split('/')
+		month = int(date[1])
+		day   = int(date[0])
+		
+		# Set the month and day. We then calculate the time delta until
+		# the next match.
+		time = time.replace(month=month, day=day)
+		delta = dateutil.relativedelta.relativedelta(time, datetime.now())
+		
+		return delta
 
 
 '''   Represents a rugby union match. '''
@@ -111,14 +197,14 @@ class Match(object):
 		self.is_active	 = False
 
                 # Initialize static fields, and get current dynamic fields.
-		self.parse_gamethread()
+		self.setup_gamethread()
  
  	''' Create a thread for this Match.
 	    Args:
 	    	target_sub: A praw.models.subreddit instance to post our submission to.
 	'''
 	def post_thread(self, target_sub):
-                
+		
 		# Thread title.
 		self.thread['title'] = "Match Thread: " + \
 				self.home_team['name'] + ' vs ' +  \
@@ -178,14 +264,27 @@ class Match(object):
                 request = requests.get(self.url)
                 tree = html.fromstring(request.content)
 
-		# Get the current score.
+		# Get the current score, and the game time.
 		self.home_team['score'], self.away_team['score'] = self.get_score(tree)
 		self.game_time = self.get_time(tree)
 		self.thread['header'] = self.format_header()
 
+		# If the game is over, then we need to set our is_active flag accordingly.
+		if self.game_time == 'FT': self.is_active = False
+		
+		# Get the try info (scorers and try time).
+                h_tries = tree.xpath('//*[@id="custom-nav"]/div[1]/div/div/'
+                                       'div[1]/div')[0]
+                a_tries = tree.xpath('//*[@id="custom-nav"]/div[1]/div/div/'
+                                       'div[2]/div')[0]
+
+                self.home_team['tries'] = self.get_tries(h_tries)
+                self.away_team['tries'] = self.get_tries(a_tries)
+
+		# Get the current events tree.
 		self.events = self.get_events(tree)
 		self.thread['events'] = self.format_events()
-
+		
 		# Perform the update.
 		self.post = self.post.edit(
 				body=self.thread['header'] + self.thread['venue'] + \
@@ -204,9 +303,34 @@ class Match(object):
 
 	''' Format the match events using Markdown syntax. '''
 	def format_events(self):
-	
+
+		event_flairs = {
+				'red_card': '[](#redcard)',
+				'yellow_card': '[](#yellowcard)',
+				'Substitute': '[](#sub)', 'substituted': '[](#sub)',
+				'Try': '[](#try)',
+				'Conversion': '[](#conv)',
+				'Penalty': '[](#pen)',
+				'Drop': '[](#drop)'
+		}
+		
+		key_events = ['red_card', 'yellow_card', 'Try', 'Conversion', 'Penalty']
 		events = "## **Match Events**:\n"
 		for event in self.events:
+			
+			# Check for a flair.
+			flair = [
+					f for f in event_flairs.keys()
+					if f in event[1].split()
+			]
+			
+			# Prepend the flair markdown. Bold the event if necessary.
+			if flair:
+				if flair[0] in key_events:
+					event[1] = '**' + event[1] + '**'
+				
+				event[1] = event_flairs[flair[0]] + ' ' + event[1]
+			
 			events += '\n\n**' + event[0] + "'**  " + event[1]
 
 		return events
@@ -217,7 +341,7 @@ class Match(object):
 	    parsing to helper functions, as we'll need to use these throughout the
 	    Match object's life.
         '''
-        def parse_gamethread(self):
+        def setup_gamethread(self):
 
                 request = requests.get(self.url)
                 tree = html.fromstring(request.content)
@@ -225,37 +349,28 @@ class Match(object):
                 # Get the competition and venue names.
                 competition = tree.xpath('//*[@id="custom-nav"]/header/div[1]')[0]
                 self.competition = competition.text_content()
-
-		venue = tree.xpath('//*[@id="main-container"]/div/div/div[1]'
-				   '/article[2]/div/div[1]/div[1]/div/span[3]')[0]
-		self.venue = venue.text_content()
-
-                # Get the team names, and their current score.
+		
+	 	venue = tree.xpath('//div[@class="game-details location-details"]')[0]
+		self.venue = venue.text_content().split(':')[1]
+               
+		# Get the team names, their flare, and their current score.
                 h_team  = tree.xpath('//*[@id="custom-nav"]/header/div[2]'
                                      '/div[1]/div/div[2]/div/div/a/span[2]')[0]
                 a_team  = tree.xpath('//*[@id="custom-nav"]/header/div[2]'
                                      '/div[3]/div/div[3]/div/div/a/span[2]')[0]
                 
 		self.home_team['name']  = h_team.text_content()
-		self.home_team['flair'] = '[] (#' + self.home_team['name'].lower() + ')'
                 self.away_team['name']  = a_team.text_content()
-		self.away_team['flair'] = '[] (#' + self.away_team['name'].lower() + ')'
-
+		
+		self.home_team['flair'] = self.get_flair(self.home_team['name'])
+		self.away_team['flair'] = self.get_flair(self.away_team['name'])
+		
 		self.home_team['score'], self.away_team['score'] = self.get_score(tree)
 
                 # Get the current game time.
 		self.game_time = self.get_time(tree)
                 
-		# Get the try info (scorers and try time).
-                h_tries = tree.xpath('//*[@id="custom-nav"]/div[1]/div/div/'
-                                       'div[1]/div')[0]
-                a_tries = tree.xpath('//*[@id="custom-nav"]/div[1]/div/div/'
-                                       'div[2]/div')[0]
-
-                self.home_team['tries'] = self.get_tries(h_tries)
-                self.away_team['tries'] = self.get_tries(a_tries)
-
-                # Get the team lineups (starters & subs).
+		# Get the team lineups (starters & subs).
                 h_lineup = tree.xpath('//*[@id="main-container"]/div/div/div[1]/'
                                 'article[1]/div/div[1]/div/div/div/table/tbody[1]')[0]
                 h_subs   = tree.xpath('//*[@id="main-container"]/div/div/div[1]/'
@@ -272,17 +387,61 @@ class Match(object):
 		
 		# Get events.
 		self.events = self.get_events(tree)
-		print self.events[:10]
-		lkjsd;
+		self.format_events()
 
-	def get_flair(self):
+	''' Returns the flair markdown for the given team.
+	    Args:
+	    	name: The name of the team.
+	'''
+	def get_flair(self, name):
+		
+		flairs_request = requests.get('https://www.reddit.com/r/rugbyunion/'
+					      'wiki/inlineflair.json',
+					      headers={'User-agent': 'RugbyUnionBot'})
 
-		flairs_url = 'https://www.reddit.com/r/rugbyunion/wiki/inlineflair.json'
-		flair_request = requests.get(flairs_url)
-		import json
-		flairs = json.load(flair_request.content)
-		print flairs
-		print flairs['content_md']
+		flairs_json    = json.loads(flairs_request.content)
+		flairs_json = flairs_json['data']['content_md'].split('inline flairs:')
+		flairs_json = flairs_json[1].split('Cards:')[0]
+
+		# Reformat name.
+		name = name.lower()
+		if len(name.split(' ')) > 1:
+			name = '-'.join(name.split(' '))
+
+		# Create a dictionary of team flairs (exclude competitions!).
+		comps = ['[](#premiership)', '[](#pro12)', '[](#top14)', '[](#super-rugby)']
+		flairs = {
+				'newcastle': '[](#newcastle)',
+				'gloucester': '[](#gloucester)',
+				'sale': '[](#sale)',
+				'worcester': '[](#worcester)',
+				'edinburgh': '[](#edinburgh)',
+				'connacht': '[](#connacht)',
+				'ulster': '[](#ulster)',
+				'cardiff-blues': '[](#cardiff-blues)',
+				'hurricanes': '[](#hurricanes)',
+				'waratahs': '[](#waratahs)'
+		}
+		
+		# Check for matches.
+		if name in flairs:
+			return flairs[name]
+		else:
+			split_name = name.split('-')
+			if (split_name[0] + split_name[1]) in flairs:
+				return flairs[split_name[0] + split_name[1]]
+			
+			# Get all possible matches. We then return the closest match
+			# i.e. the one with the longest key.
+			matches = {}
+			for _name in split_name:
+				results = [f for f in flairs.keys() if f.find(_name) != -1]
+				if results: matches[_name] = results
+			if matches:
+				name = max(matches.keys(), key=len)
+				return flairs[name]
+		
+		return ""
 
 	''' Get the current score, and return a tuple like so: (home score, away score)
 	    Args:
@@ -355,7 +514,6 @@ class Match(object):
 				players.append( (int(number), name, pos) )
 		
 		# Ensure that players are sorted in ascending order by number.
-		from operator import itemgetter
 		players.sort(key=itemgetter(0))
 
 		return players
@@ -397,11 +555,15 @@ r = praw.Reddit(client_id=CLIENT_ID,
 		password=PASSWORD
 )
 
+SUBREDDIT_NAME = 'testingground4bots'
 CACHE_SIZE     = 20
-POLL_INTERVAL  = 30
+HOURS_BEFORE   = 2
 
 if __name__=='__main__':
         
 	scheduler = Scheduler(subreddit_name=SUBREDDIT_NAME, cache_size=CACHE_SIZE)
-	scheduler.run_scheduler(poll_interval=POLL_INTERVAL)
+	#u = 'http://www.espn.co.uk/rugby/match?gameId=290761&league=272073'
+	#m = Match(u)
+	#m.update_thread()
+	scheduler.run_scheduler(hours_before=HOURS_BEFORE)
 
