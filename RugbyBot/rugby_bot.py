@@ -31,79 +31,75 @@ class Scheduler(object):
 	    	cache_size: The size of our match cache.
 		*url: The URL to get the match data from.
 	'''
-	def __init__(self, subreddit_name, cache_size, url='http://www.espn.co.uk'):
+	def __init__(self, url, subreddit_name, cache_size, hours_before):
 		
 		self.base_url 	   = url
 		self.url 	   = self.base_url + '/rugby/scoreboard'
 		self.target_sub	   = r.subreddit(subreddit_name)
 
 		self.cache	   = deque(maxlen=cache_size)
+		self.hours_before  = hours_before
 
 	''' Wrapper for _run_scheduler(). Runs the scheduler and polls according
 	    to the given polling interval.
 	    Args:
 	    	poll_interval: The interval between polls.
 	'''
-	def run_scheduler(self, hours_before):
+	def run_scheduler(self, poll_interval):
 		
-		# Set a Cron job.
+		# We run in intervals. Sleep until the first match, then run until
+		# all matches have completed. Then sleep again until midnight & repeat.
 		while True:
-			interval = self.get_interval()
-			interval[0].hours -= hours_before
-			interval[1].hours += hours_before + 1
 			
-			print 'sleeping for ', interval[0].days, ' days, ',\
-				interval[0].hours, ' hours and ',\
-				interval[0].minutes, ' minutes.'
+			interval = self.get_interval()
+			print 'sleeping for ', interval.days, ' days, ',\
+				interval.hours, ' hours and ',\
+				interval.minutes, ' minutes.'
 			
 			# Determine the number of seconds until the next game, and
 			# sleep for them.
-			interval_open = ((interval[0].hours * 60) * 60) +\
-					 (interval[0].minutes * 60) +\
-					  interval[0].seconds
-			time.sleep(interval_open)
+			interval_seconds = (((interval.days * 24) * 60) * 60) +\
+					   ((interval.hours * 60) * 60) +\
+					   (interval.minutes * 60) +\
+					   (interval.seconds)
+			time.sleep(interval_seconds)
 			
-			# When we wake up, calculate the interval time and run
-			# our program until it is up.
-			interval_time = \
-				  ((interval[1].hours - interval[0].hours) * 60) *60\
-				+ ((interval[1].minutes - interval[0].minutes) * 60)\
-				+ ((interval[1].seconds) - interval[0].seconds)
-
-			print 'running for ', interval_time / 60 / 60, ' hours.'
-			while time.time() < interval_time:
+			# Get the matches, and run the scheduler on them.
+			self.cache = self.get_matches(self.url)
+			while self.cache:
 				try:
 					self._run_scheduler()
-				except Exception:
-					pass
+				except Exception as exc:
+					print str(exc)
 				
-				time.sleep(30)
+				time.sleep(POLL_INTERVAL)
 
-			# Determine the amount of time until midnight, and then sleep
-			# until then before restarting the cycle all over again.
-			minutes_left = (60 * interval[1].hours) + interval[1].minutes
-			time_to_midnight = (24*60) - minutes_left
+			# Determine the amount of time until midnight (in seconds),
+			# and then sleep  until then before restarting the cycle.
+			minutes_left = (datetime.now().hour * 60) + datetime.now().minute
+			time_to_midnight = ((24 * 60) - minutes_left) * 60
 
 			print 'cycle complete.'
-			print 'sleeping for ', time_to_midnight, ' minutes.'
-			
+			print 'sleeping for ', time_to_midnight / 60, ' minutes.'
 			time.sleep(time_to_midnight)
 	
-	''' Run the scheduler to determine which match threads need to
-	    be created. '''
+	''' Run the scheduler and determine which operation to perform. If a match
+	    thread exists, and is active, then we update it. If it exists and is 
+	    not active then we remove it. If no match thread exists then we create one.
+	'''
 	def _run_scheduler(self):
 		
-		# Perform an update on the match thread (assuming the match is already
-		# posted and is active), or create a new match thread.
-		self.get_matches(self.url)
+		# Cycle through the cache and perform the appropriate action.
 		for match in self.cache:
-			match = self.cache[2]
 			if match.is_posted and match.is_active:
 				match.update_thread()
-				print 'UPDATE 200: ', match
-			elif not match.is_posted:
+				print 'updating ', match
+			elif match.is_posted and (not match.is_active):
+				print 'removing ', match
+				self.cache.remove(match)
+			elif self.is_ready(match) and (not match.is_posted):
 				match.post_thread(target_sub=self.target_sub)
-				print 'POST 200: ', match
+				print 'posting ', match
 		
 	''' Returns a list of Match objects that are not currently in the
 	    scheduler's cache.
@@ -119,16 +115,31 @@ class Scheduler(object):
 		
 		# Append a Match to our cache iff it hasn't already been added, and is
 		# ready to be added.
+		matches = []
 		for match in schedule:
 			match_url = self.base_url + match.get('href')
+			print 'getting ', match_url
 			if not any((match.url == match_url) for match in self.cache):
-				self.cache.append(
-						Match(self.base_url + match.get('href'))
-				)
+				matches.append(Match(self.base_url + match.get('href')))
 
-	''' Get the next interaval to run on. '''
+		return matches
+	
+	''' Determines if the match is ready to be posted. '''
+	def is_ready(self, match):
+
+		match_time = date_parser.parse(match.game_time)
+		
+		# Find the number of minutes until the match. If this is less than the
+		# given 'hours_before' arg, then the match is ready to be posted.
+		delta = dateutil.relativedelta.relativedelta(datetime.now(), match_time)
+		delta_minutes = abs(delta.hours * 60) + abs(delta.minutes)
+		
+		return delta_minutes <= (self.hours_before * 60)
+
+	''' Get the next interval to run on. '''
 	def get_interval(self):
 		
+		self.url = 'http://www.espn.co.uk/rugby/scoreboard?date=20170408'
 		request = requests.get(self.url)
 		tree = html.fromstring(request.content)
 	
@@ -136,28 +147,23 @@ class Scheduler(object):
 		dates	 = tree.xpath('//span[@class="game-date"]')
 		times	 = tree.xpath('//span[@class="game-time"]')
 		dts	 = [
-				[date.text_content(), time.text_content()]
+				[date.text_content(), date_parser.parse(time.text_content())]
 				for date, time in zip(dates, times)
 		]
-
-		# Now sort them by time (we assume the day is the same).
-		for dt in dts: dt[1] = date_parser.parse(dt[1])
-		dts.sort(key=itemgetter(1))
-
-		# Get the opening and closing endpoints, and format them.
-		a_endpoint = dts[0]
-		b_endpoint = dts[-1]
-
-		return [ self.format_endpoint(a_endpoint[0], a_endpoint[1]), 
-		         self.format_endpoint(b_endpoint[0], b_endpoint[1]) ]
+		
+		# Get the time of the next match.
+		next_match = min(dts, key=itemgetter(1))
+		
+		return self.get_time_until(next_match)
 
 	''' Returns a relativedelta object which represents the amount of time
-	    before the given date and time.
+	    until the given match date and time.
 	    Args:
-	    	date: A list containing the month and day.
-		time: A datetime object containing the match time.
+	    	next_match: A tuple containing the date and time of the next match.
 	'''
-	def format_endpoint(self, date, time):
+	def get_time_until(self, next_match):
+
+		date, time = next_match[0], next_match[1]
 
 		# Get the number of months and days until the match.
 		date = date.split('/')
@@ -240,18 +246,11 @@ class Match(object):
 			self.thread['lineups'] += str(a_sub[0]) + '.   ' + a_sub[1] + '\n'
 		self.thread['lineups'] += '\n\n----\n\n'
 		
-		# Match Events.
-		self.thread['events'] = self.format_events()
-		
-		print self.thread['header'] + self.thread['venue'] + \
-			      	     	 self.thread['lineups'] + self.thread['events']
-		dslkj;
-
 		# Post the thread, and update the posted flag.
 		self.post = target_sub.submit(
 				title=self.thread['title'],
 			 	selftext=self.thread['header'] + self.thread['venue'] + \
-			      	     	 self.thread['lineups'] + self.thread['events']
+			      	     	 self.thread['lineups']
 		)
 		
 		self.is_posted = True
@@ -369,7 +368,7 @@ class Match(object):
 
                 # Get the current game time.
 		self.game_time = self.get_time(tree)
-                
+		
 		# Get the team lineups (starters & subs).
                 h_lineup = tree.xpath('//*[@id="main-container"]/div/div/div[1]/'
                                 'article[1]/div/div[1]/div/div/div/table/tbody[1]')[0]
@@ -384,10 +383,6 @@ class Match(object):
                 self.home_team['subs'] 	   = self.get_lineup(h_subs)
 		self.away_team['starters'] = self.get_lineup(a_lineup)
 		self.away_team['subs']	   = self.get_lineup(a_subs)
-		
-		# Get events.
-		self.events = self.get_events(tree)
-		self.format_events()
 
 	''' Returns the flair markdown for the given team.
 	    Args:
@@ -395,34 +390,60 @@ class Match(object):
 	'''
 	def get_flair(self, name):
 		
-		flairs_request = requests.get('https://www.reddit.com/r/rugbyunion/'
-					      'wiki/inlineflair.json',
-					      headers={'User-agent': 'RugbyUnionBot'})
+		# Team flairs.
+		flairs = {
+				# Premiership:
+ 				'wasps': '[](#wasps)',
+				'exeter-chiefs': '[](#exeter-chiefs)',
+				'saracens': '[](#saracens)', 'bath': '[](#bath)',
+ 				'leicester': '[](#leicester)',
+				'northampton': '[](#northampton)',
+ 				'harlequins': '[](#harlequins)',
+				'newcastle': '[](#newcastle)',
+				'gloucester': '[](#gloucester)',
+				'sale': '[](#sale)', 'worcester': '[](#worcester)',
+ 				'bristol': '[](#bristol)',
+				
+				# PRO 12:
+				'leinster': '[](#leinster)', 'ospreys': '[](#ospreys)',
+				'munster': '[](#munster)', 'ulster': '[](#ulster)',
+				'llanelli-scarlets': '[](#llanelli-scarlets)',
+				'glasgow': '[](#glasgow)', 'connacht': '[](#connacht)',
+				'cardiff-blues': '[](#cardiff-blues)',
+				'edinburgh': '[](#edinburgh)', 'newport': '[](#newport)',
+				'treviso': '[](#treviso', 'zebre': '[](#zebre)',
 
-		flairs_json    = json.loads(flairs_request.content)
-		flairs_json = flairs_json['data']['content_md'].split('inline flairs:')
-		flairs_json = flairs_json[1].split('Cards:')[0]
+				# TOP 14:
+				'larochelle': '[](#larochelle)',
+				'clermont-auvergne': '[](#clermont-auvergne)',
+ 				'montpellier': '[](#montpellier)', 'pau': '[](#pau)',
+				'castres': '[](#castres)', 'toulon': '[](#toulon)',
+ 				'racing-metro': '[](#racing-metro)',
+				'bordeaux': '[](#bordeaux)', 'brive': '[](#brive)',
+ 				'toulousain': '[](#toulousain)', 'lyon': '[](#lyon)',
+ 				'paris': '[](#paris)', 'grenoble': '[](#grenoble)',
+ 				'bayonne': '[](#bayonne)',
+
+				# Super Rugby:
+				'waikato-chiefs': '[](#waikato-chiefs)',
+				'jaguares': '[](#jaguares)', 'stormers': '[](#stormers)',
+				'brumbles': '[](#brumbles)', 'crusaders': '[](#crusaders)',
+				'hurricanes': '[](#hurricanes)', 'lions': '[](#lions)',
+				'blues': '[](#blues)', 'sharks': '[](#sharks)',
+ 				'cheetahs': '[](#cheetahs)', 'reds': '[](#reds)',
+				'bulls': '[](#bulls)',
+				'western-force': '[](#western-force)',
+				'southern-kings': '[](#southern-kings)',
+				'highlanders': '[](#highlanders)',
+				'waratahs': '[](#waratahs)', 'sunwolves': '[](#sunwolves)',
+ 				'melbourne-rebels': '[](#melbourne-rebels)'
+		}
 
 		# Reformat name.
 		name = name.lower()
 		if len(name.split(' ')) > 1:
 			name = '-'.join(name.split(' '))
 
-		# Create a dictionary of team flairs (exclude competitions!).
-		comps = ['[](#premiership)', '[](#pro12)', '[](#top14)', '[](#super-rugby)']
-		flairs = {
-				'newcastle': '[](#newcastle)',
-				'gloucester': '[](#gloucester)',
-				'sale': '[](#sale)',
-				'worcester': '[](#worcester)',
-				'edinburgh': '[](#edinburgh)',
-				'connacht': '[](#connacht)',
-				'ulster': '[](#ulster)',
-				'cardiff-blues': '[](#cardiff-blues)',
-				'hurricanes': '[](#hurricanes)',
-				'waratahs': '[](#waratahs)'
-		}
-		
 		# Check for matches.
 		if name in flairs:
 			return flairs[name]
@@ -487,35 +508,20 @@ class Match(object):
         '''
         def get_lineup(self, lineup_element):
 
-                # Go through each row and extract the player data. N.B -- We need
-		# to traverse the tree to get each row.
+                # Go through each row and extract the player data.
                 players = []
-                for e in lineup_element.getchildren():
+                for row in lineup_element.getchildren():
 			
-			# ESPN occasionally screws up the last row in the div, so
-			# we need to handle this.
-			try:
-				row = e.getchildren()[0].getchildren()[0].getchildren()[0]
-				
-				# Parse the player's number, then their name and position.
-				number = row.getchildren()[1].text_content()
-				player = row.getchildren()[2].text_content().split(',')
-				name   = player[0]
-				pos    = player[1][1:].split(' ')[0]
+			number = row.findall('.//span[@class="number"]')[0].text_content()
 			
-			except IndexError:
-				number = row.getchildren()[0].text_content()
-
-				player = row.getchildren()[1].text_content().split(',')
-				name   = player[0]
-				pos    = player[1].strip()
-			
-			finally:
-				players.append( (int(number), name, pos) )
+			player = row.findall('.//span[@class="name"]')[0].text_content()
+			name = player.split(',')[0]
+			pos  = player.split(',')[1].strip()
+		
+			players.append( (int(number), name, pos) )
 		
 		# Ensure that players are sorted in ascending order by number.
 		players.sort(key=itemgetter(0))
-
 		return players
 
 	''' Get all key events during the match.
@@ -547,7 +553,6 @@ class Match(object):
 
 
 # ========================================================================
-
 r = praw.Reddit(client_id=CLIENT_ID,
 		client_secret=CLIENT_SECRET,
 		user_agent=USER_AGENT,
@@ -555,15 +560,17 @@ r = praw.Reddit(client_id=CLIENT_ID,
 		password=PASSWORD
 )
 
+URL	       = 'http://www.espn.co.uk'
 SUBREDDIT_NAME = 'testingground4bots'
 CACHE_SIZE     = 20
+POLL_INTERVAL  = 30
 HOURS_BEFORE   = 2
 
 if __name__=='__main__':
         
-	scheduler = Scheduler(subreddit_name=SUBREDDIT_NAME, cache_size=CACHE_SIZE)
+	scheduler = Scheduler(url=URL, subreddit_name=SUBREDDIT_NAME,
+			      cache_size=CACHE_SIZE, hours_before=HOURS_BEFORE)
 	#u = 'http://www.espn.co.uk/rugby/match?gameId=290761&league=272073'
-	#m = Match(u)
 	#m.update_thread()
-	scheduler.run_scheduler(hours_before=HOURS_BEFORE)
+	scheduler.run_scheduler(POLL_INTERVAL)
 
