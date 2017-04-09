@@ -50,7 +50,6 @@ class Scheduler(object):
 		# We run in intervals. Sleep until the first match, then run until
 		# all matches have completed. Then sleep again until midnight & repeat.
 		while True:
-			
 			interval = self.get_interval()
 			print 'sleeping for ', interval.days, ' days, ',\
 				interval.hours, ' hours and ',\
@@ -91,6 +90,7 @@ class Scheduler(object):
 		
 		# Cycle through the cache and perform the appropriate action.
 		for match in self.cache:
+			print match.home_team['name'], ' vs ', match.away_team['name']
 			if match.is_posted and match.is_active:
 				match.update_thread()
 				print 'updating ', match
@@ -100,6 +100,7 @@ class Scheduler(object):
 			elif self.is_ready(match) and (not match.is_posted):
 				match.post_thread(target_sub=self.target_sub)
 				print 'posting ', match
+			print
 		
 	''' Returns a list of Match objects that are not currently in the
 	    scheduler's cache.
@@ -127,19 +128,18 @@ class Scheduler(object):
 	''' Determines if the match is ready to be posted. '''
 	def is_ready(self, match):
 
-		match_time = date_parser.parse(match.game_time)
+		match_time = date_parser.parse(match.kickoff_time)
 		
 		# Find the number of minutes until the match. If this is less than the
 		# given 'hours_before' arg, then the match is ready to be posted.
-		delta = dateutil.relativedelta.relativedelta(datetime.now(), match_time)
-		delta_minutes = abs(delta.hours * 60) + abs(delta.minutes)
+		delta = dateutil.relativedelta.relativedelta(match_time, datetime.now())
+		delta_minutes = (delta.hours * 60) + (delta.minutes)
 		
 		return delta_minutes <= (self.hours_before * 60)
 
 	''' Get the next interval to run on. '''
 	def get_interval(self):
 		
-		self.url = 'http://www.espn.co.uk/rugby/scoreboard?date=20170408'
 		request = requests.get(self.url)
 		tree = html.fromstring(request.content)
 	
@@ -149,8 +149,12 @@ class Scheduler(object):
 		dts	 = [
 				[date.text_content(), date_parser.parse(time.text_content())]
 				for date, time in zip(dates, times)
+				if time != 'FT'
 		]
-		
+
+		# If no games are scheduled then we return an empty relativedelta.
+		if not dts: return dateutil.relativedelta.relativedelta()
+
 		# Get the time of the next match.
 		next_match = min(dts, key=itemgetter(1))
 		
@@ -188,11 +192,12 @@ class Match(object):
 		self.sub = 'bottesting'
 
                 # Match data.
-		self.competition = None
-		self.venue 	 = None
-                self.game_time   = None
-		self.key_events	 = None
-		self.post 	 = None
+		self.competition  = None
+		self.venue 	  = None
+		self.kickoff_time = None
+                self.game_time    = None
+		self.key_events	  = None
+		self.post 	  = None
 		
 		self.thread 	 = {}
                 self.home_team   = {}
@@ -221,7 +226,6 @@ class Match(object):
 		
 		# TODO: Post scorers.
 		#thread += ', '.join([' '.join(_try) for _try in self.home_team['tries']])
-		self.thread['venue'] = '\n## **Venue**: ' + self.venue + '\n\n----\n\n'
 		
 		# Lineups: Starters, then Replacements.
 		self.thread['lineups'] = "## **Starting Lineups**:\n\n"
@@ -245,12 +249,11 @@ class Match(object):
 						  h_sub[1] + ' | ' + h_sub[2]  + ' | '
 			self.thread['lineups'] += str(a_sub[0]) + '.   ' + a_sub[1] + '\n'
 		self.thread['lineups'] += '\n\n----\n\n'
-		
+
 		# Post the thread, and update the posted flag.
 		self.post = target_sub.submit(
 				title=self.thread['title'],
-			 	selftext=self.thread['header'] + self.thread['venue'] + \
-			      	     	 self.thread['lineups']
+			 	selftext=self.thread['header'] + self.thread['lineups']
 		)
 		
 		self.is_posted = True
@@ -286,17 +289,22 @@ class Match(object):
 		
 		# Perform the update.
 		self.post = self.post.edit(
-				body=self.thread['header'] + self.thread['venue'] + \
-			      	     self.thread['lineups'] + self.thread['events']
+				body=self.thread['header'] + self.thread['lineups'] + \
+				     self.thread['events']
 		)
 
 	''' Format the thread header using Markdown syntax. '''
 	def format_header(self):
 		
+		# Format the team names with their respective flairs and scores.
 		header = '# ' + self.game_time + ': ' + \
 			  self.home_team['name'] + ' ' + self.home_team['flair'] + ' ' + \
 			  self.home_team['score'] + '-' + self.away_team['score'] + ' ' + \
-			  self.away_team['flair'] + ' ' + self.away_team['name'] + '\n'
+			  self.away_team['flair'] + ' ' + self.away_team['name'] + '\n\n'
+
+		# Format venue and kickoff time.
+		header += '### **Venue**: ' + self.venue + '\n\n' + \
+			  '### **Kickoff Time**: ' + self.kickoff_time + '\n\n----\n\n'
 
 		return header
 
@@ -348,9 +356,12 @@ class Match(object):
                 # Get the competition and venue names.
                 competition = tree.xpath('//*[@id="custom-nav"]/header/div[1]')[0]
                 self.competition = competition.text_content()
-		
+
 	 	venue = tree.xpath('//div[@class="game-details location-details"]')[0]
 		self.venue = venue.text_content().split(':')[1]
+
+		kickoff = tree.xpath('//div[@class="game-date-time"]')[0]
+		self.kickoff_time = kickoff.text_content().split(',')[0]
                
 		# Get the team names, their flare, and their current score.
                 h_team  = tree.xpath('//*[@id="custom-nav"]/header/div[2]'
@@ -410,8 +421,8 @@ class Match(object):
 				'llanelli-scarlets': '[](#llanelli-scarlets)',
 				'glasgow': '[](#glasgow)', 'connacht': '[](#connacht)',
 				'cardiff-blues': '[](#cardiff-blues)',
-				'edinburgh': '[](#edinburgh)', 'newport': '[](#newport)',
-				'treviso': '[](#treviso', 'zebre': '[](#zebre)',
+				'edinburgh': '[](#edinburgh)', 'dragons': '[](#newport)',
+				'treviso': '[](#treviso)', 'zebre': '[](#zebre)',
 
 				# TOP 14:
 				'larochelle': '[](#larochelle)',
@@ -427,7 +438,7 @@ class Match(object):
 				# Super Rugby:
 				'waikato-chiefs': '[](#waikato-chiefs)',
 				'jaguares': '[](#jaguares)', 'stormers': '[](#stormers)',
-				'brumbles': '[](#brumbles)', 'crusaders': '[](#crusaders)',
+				'brumbies': '[](#brumbles)', 'crusaders': '[](#crusaders)',
 				'hurricanes': '[](#hurricanes)', 'lions': '[](#lions)',
 				'blues': '[](#blues)', 'sharks': '[](#sharks)',
  				'cheetahs': '[](#cheetahs)', 'reds': '[](#reds)',
@@ -443,14 +454,16 @@ class Match(object):
 		name = name.lower()
 		if len(name.split(' ')) > 1:
 			name = '-'.join(name.split(' '))
-
+		
 		# Check for matches.
 		if name in flairs:
 			return flairs[name]
 		else:
 			split_name = name.split('-')
-			if (split_name[0] + split_name[1]) in flairs:
-				return flairs[split_name[0] + split_name[1]]
+			try:
+				if (split_name[0] + split_name[1]) in flairs:
+					return flairs[split_name[0] + split_name[1]]
+			except IndexError: pass
 			
 			# Get all possible matches. We then return the closest match
 			# i.e. the one with the longest key.
@@ -460,6 +473,7 @@ class Match(object):
 				if results: matches[_name] = results
 			if matches:
 				name = max(matches.keys(), key=len)
+				name = matches[name][0]
 				return flairs[name]
 		
 		return ""
@@ -508,13 +522,21 @@ class Match(object):
         '''
         def get_lineup(self, lineup_element):
 
-                # Go through each row and extract the player data.
+                # Go through each row and extract the player data. N.B. -- Sometimes
+		# ESPN will screw up the lineup formatting, so we'll need to handle this.
                 players = []
                 for row in lineup_element.getchildren():
+			try:
+				number = row.findall('.//span[@class="number"]')\
+					 [0].text_content()
+				player = row.findall('.//span[@class="name"]')\
+					 [0].text_content()
+			except IndexError:
+				number = row.findall('.//td[@class="number"]')\
+					 [0].text_content()
+				player = row.findall('.//td[@class="date"]')\
+					 [0].text_content()
 			
-			number = row.findall('.//span[@class="number"]')[0].text_content()
-			
-			player = row.findall('.//span[@class="name"]')[0].text_content()
 			name = player.split(',')[0]
 			pos  = player.split(',')[1].strip()
 		
@@ -553,6 +575,7 @@ class Match(object):
 
 
 # ========================================================================
+
 r = praw.Reddit(client_id=CLIENT_ID,
 		client_secret=CLIENT_SECRET,
 		user_agent=USER_AGENT,
