@@ -90,7 +90,6 @@ class Scheduler(object):
 		
 		# Cycle through the cache and perform the appropriate action.
 		for match in self.cache:
-			print match.home_team['name'], ' vs ', match.away_team['name']
 			if match.is_posted and match.is_active:
 				match.update_thread()
 				print 'updating ', match
@@ -128,7 +127,11 @@ class Scheduler(object):
 	''' Determines if the match is ready to be posted. '''
 	def is_ready(self, match):
 
+		EST_BST_TIME_DIFF = 5
 		match_time = date_parser.parse(match.kickoff_time)
+		
+		TIME_DIFF = match_time.hour - EST_BST_TIME_DIFF
+		match_time = match_time.replace(hour=TIME_DIFF)
 		
 		# Find the number of minutes until the match. If this is less than the
 		# given 'hours_before' arg, then the match is ready to be posted.
@@ -151,7 +154,7 @@ class Scheduler(object):
 				for date, time in zip(dates, times)
 				if time != 'FT'
 		]
-
+		
 		# If no games are scheduled then we return an empty relativedelta.
 		if not dts: return dateutil.relativedelta.relativedelta()
 
@@ -179,6 +182,10 @@ class Scheduler(object):
 		time = time.replace(month=month, day=day)
 		delta = dateutil.relativedelta.relativedelta(time, datetime.now())
 		
+		# Set the timezone to EST, and account for hours before.
+		EST_BST_TIME_DIFF = 5
+		delta.hours 	 -= EST_BST_TIME_DIFF + self.hours_before
+
 		return delta
 
 
@@ -216,11 +223,26 @@ class Match(object):
 	'''
 	def post_thread(self, target_sub):
 		
+		#TODO: Refactor this into sub method.
+		bst = date_parser.parse(self.kickoff_time)
+		nz  = bst.replace(bst.hour + 11)
+		az  = bst.replace(bst.hour + 9)
+		est = bst.replace(bst.hour - 5)
+
+		diff_tzs = [('BST', bst), ('NZ', nz), ('AU', az), ('EST', est)]
+		
+		self.tzs = ' '
+		for tz in diff_tzs:
+			self.tzs += str(tz[1].hour) + ':' + str(tz[1].minute) + \
+					' ' + tz[0] + ', '
+		self.tzs = self.tzs[:-2]
+
 		# Thread title.
 		self.thread['title'] = "Match Thread: " + \
 				self.home_team['name'] + ' vs ' +  \
-				self.away_team['name'] + ' [' + self.competition + ']'
-		
+				self.away_team['name'] + ' [' + self.competition + ']' +\
+				self.tzs
+
 		# Title / Header.
 		self.thread['header'] = self.format_header()
 		
@@ -312,8 +334,8 @@ class Match(object):
 	def format_events(self):
 
 		event_flairs = {
-				'red_card': '[](#redcard)',
-				'yellow_card': '[](#yellowcard)',
+				'Red Card': '[](#redcard)',
+				'Yellow Card': '[](#yellowcard)',
 				'Substitute': '[](#sub)', 'substituted': '[](#sub)',
 				'Try': '[](#try)',
 				'Conversion': '[](#conv)',
@@ -321,7 +343,7 @@ class Match(object):
 				'Drop': '[](#drop)'
 		}
 		
-		key_events = ['red_card', 'yellow_card', 'Try', 'Conversion', 'Penalty']
+		key_events = ['Red Card', 'Yellow Card', 'Try', 'Conversion', 'Penalty']
 		events = "## **Match Events**:\n"
 		for event in self.events:
 			
@@ -575,7 +597,6 @@ class Match(object):
 
 
 # ========================================================================
-
 r = praw.Reddit(client_id=CLIENT_ID,
 		client_secret=CLIENT_SECRET,
 		user_agent=USER_AGENT,
@@ -584,7 +605,8 @@ r = praw.Reddit(client_id=CLIENT_ID,
 )
 
 URL	       = 'http://www.espn.co.uk'
-SUBREDDIT_NAME = 'testingground4bots'
+#SUBREDDIT_NAME = 'testingground4bots'
+SUBREDDIT_NAME = 'rugbyunion'
 CACHE_SIZE     = 20
 POLL_INTERVAL  = 30
 HOURS_BEFORE   = 2
