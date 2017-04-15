@@ -90,6 +90,7 @@ class Scheduler(object):
 		
 		# Cycle through the cache and perform the appropriate action.
 		for match in self.cache:
+			print match.home_team['name'], ' vs ', match.away_team['name']
 			if match.is_posted and match.is_active:
 				match.update_thread()
 				print 'updating ', match
@@ -99,13 +100,15 @@ class Scheduler(object):
 			elif self.is_ready(match) and (not match.is_posted):
 				match.post_thread(target_sub=self.target_sub)
 				print 'posting ', match
+			else:
+				print 'no action'
 			print
 		
 	''' Returns a list of Match objects that are not currently in the
 	    scheduler's cache.
 	'''
 	def get_matches(self, url):
-
+		
 		request = requests.get(url)
 		tree = html.fromstring(request.content)
 
@@ -121,7 +124,10 @@ class Scheduler(object):
 			print 'getting ', match_url
 			if not any((match.url == match_url) for match in self.cache):
 				matches.append(Match(self.base_url + match.get('href')))
-
+		
+		matches = [match for match in matches
+			   if match.competition.lower().find('super rugby') != -1]
+		
 		return matches
 	
 	''' Determines if the match is ready to be posted. '''
@@ -196,7 +202,6 @@ class Match(object):
         def __init__(self, url):
 
                 self.url = url
-		self.sub = 'bottesting'
 
                 # Match data.
 		self.competition  = None
@@ -223,25 +228,11 @@ class Match(object):
 	'''
 	def post_thread(self, target_sub):
 		
-		#TODO: Refactor this into sub method.
-		bst = date_parser.parse(self.kickoff_time)
-		nz  = bst.replace(bst.hour + 11)
-		az  = bst.replace(bst.hour + 9)
-		est = bst.replace(bst.hour - 5)
-
-		diff_tzs = [('BST', bst), ('NZ', nz), ('AU', az), ('EST', est)]
-		
-		self.tzs = ' '
-		for tz in diff_tzs:
-			self.tzs += str(tz[1].hour) + ':' + str(tz[1].minute) + \
-					' ' + tz[0] + ', '
-		self.tzs = self.tzs[:-2]
-
 		# Thread title.
 		self.thread['title'] = "Match Thread: " + \
 				self.home_team['name'] + ' vs ' +  \
-				self.away_team['name'] + ' [' + self.competition + ']' +\
-				self.tzs
+				self.away_team['name'] + ' [' + self.competition + '] ' +\
+				self.format_timezones()
 
 		# Title / Header.
 		self.thread['header'] = self.format_header()
@@ -257,7 +248,7 @@ class Match(object):
 		self.thread['lineups'] += ":-|:-|:-\n"
 		for h_player, a_player in zip(self.home_team['starters'],
 					      self.away_team['starters']):
-			self.thread['lineups'] += str(h_player[0]) + ' .  ' + \
+			self.thread['lineups'] += str(h_player[0]) + '.  ' + \
 						  h_player[1] + ' | ' + h_player[2] + ' | '
 			self.thread['lineups'] += str(a_player[0]) + '.   ' + \
 						  a_player[1] + '\n'
@@ -271,7 +262,7 @@ class Match(object):
 						  h_sub[1] + ' | ' + h_sub[2]  + ' | '
 			self.thread['lineups'] += str(a_sub[0]) + '.   ' + a_sub[1] + '\n'
 		self.thread['lineups'] += '\n\n----\n\n'
-
+		
 		# Post the thread, and update the posted flag.
 		self.post = target_sub.submit(
 				title=self.thread['title'],
@@ -296,6 +287,7 @@ class Match(object):
 		# If the game is over, then we need to set our is_active flag accordingly.
 		if self.game_time == 'FT': self.is_active = False
 		
+		'''
 		# Get the try info (scorers and try time).
                 h_tries = tree.xpath('//*[@id="custom-nav"]/div[1]/div/div/'
                                        'div[1]/div')[0]
@@ -304,6 +296,7 @@ class Match(object):
 
                 self.home_team['tries'] = self.get_tries(h_tries)
                 self.away_team['tries'] = self.get_tries(a_tries)
+		'''
 
 		# Get the current events tree.
 		self.events = self.get_events(tree)
@@ -315,18 +308,51 @@ class Match(object):
 				     self.thread['events']
 		)
 
+	''' Format the kick off times into different timezones. '''
+	def format_timezones(self):
+
+		bst = date_parser.parse(self.kickoff_time)
+		nz  = bst.replace(hour=(bst.hour + 11) % 24)
+		au  = bst.replace(hour=(bst.hour + 9) % 24)
+		sa  = bst.replace(hour=(bst.hour + 1) % 24)
+		est = bst.replace(hour=(bst.hour - 5) % 24)
+		
+		regions = [
+				('BST', bst), ('NZ', nz), ('AU', au),
+				('SA', sa), ('EST', est)
+		]
+		
+		timezones = []
+		for tz in regions:
+			hour = str(tz[1].hour)
+			minute = str(tz[1].minute)
+			
+			# Prepend a '0' to any single digit value.
+			if tz[1].hour   < 10: hour   = '0' + hour
+			if tz[1].minute < 10: minute = '0' + minute
+
+			timezones.append(hour + ':' + minute + ' ' + tz[0])
+		
+		return ', '.join(timezones)
+
 	''' Format the thread header using Markdown syntax. '''
 	def format_header(self):
+		
+		# If the game is active then we'll use a different delimiter.
+		DELIM = ' - '
+		if (self.home_team['score'] == '') and (self.away_team['score'] == ''):
+			DELIM = ' vs '
 		
 		# Format the team names with their respective flairs and scores.
 		header = '# ' + self.game_time + ': ' + \
 			  self.home_team['name'] + ' ' + self.home_team['flair'] + ' ' + \
-			  self.home_team['score'] + '-' + self.away_team['score'] + ' ' + \
+			  self.home_team['score'] + DELIM + self.away_team['score'] + ' ' +\
 			  self.away_team['flair'] + ' ' + self.away_team['name'] + '\n\n'
 
 		# Format venue and kickoff time.
 		header += '### **Venue**: ' + self.venue + '\n\n' + \
-			  '### **Kickoff Time**: ' + self.kickoff_time + '\n\n----\n\n'
+			  '### **Kickoff Time**: ' + self.kickoff_time + ' BST' +\
+			  '\n\n----\n\n'
 
 		return header
 
@@ -334,8 +360,8 @@ class Match(object):
 	def format_events(self):
 
 		event_flairs = {
-				'Red Card': '[](#redcard)',
-				'Yellow Card': '[](#yellowcard)',
+				'Red card': '[](#redcard)',
+				'Yellow card': '[](#yellowcard)',
 				'Substitute': '[](#sub)', 'substituted': '[](#sub)',
 				'Try': '[](#try)',
 				'Conversion': '[](#conv)',
@@ -597,6 +623,10 @@ class Match(object):
 
 
 # ========================================================================
+
+USER_AGENT    = 'RugbyUnionBot'
+USERNAME      = 'RugbyUnionBot'
+
 r = praw.Reddit(client_id=CLIENT_ID,
 		client_secret=CLIENT_SECRET,
 		user_agent=USER_AGENT,
@@ -605,7 +635,6 @@ r = praw.Reddit(client_id=CLIENT_ID,
 )
 
 URL	       = 'http://www.espn.co.uk'
-#SUBREDDIT_NAME = 'testingground4bots'
 SUBREDDIT_NAME = 'rugbyunion'
 CACHE_SIZE     = 20
 POLL_INTERVAL  = 30
@@ -615,7 +644,8 @@ if __name__=='__main__':
         
 	scheduler = Scheduler(url=URL, subreddit_name=SUBREDDIT_NAME,
 			      cache_size=CACHE_SIZE, hours_before=HOURS_BEFORE)
-	#u = 'http://www.espn.co.uk/rugby/match?gameId=290761&league=272073'
+	#u = 'http://www.espn.co.uk/rugby/match?gameId=290105&league=267979'
+	#m = Match(u)
 	#m.update_thread()
 	scheduler.run_scheduler(POLL_INTERVAL)
 
