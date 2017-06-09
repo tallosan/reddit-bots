@@ -11,7 +11,7 @@ from lxml import html
 
 import time
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import dateutil
 import dateutil.parser as date_parser
@@ -50,7 +50,7 @@ class Scheduler(object):
 		# We run in intervals. Sleep until the first match, then run until
 		# all matches have completed. Then sleep again until midnight & repeat.
 		while True:
-			interval = self.get_interval()
+		        interval = self.get_interval()
 			print 'sleeping for ', interval.days, ' days, ',\
 				interval.hours, ' hours and ',\
 				interval.minutes, ' minutes.'
@@ -62,9 +62,14 @@ class Scheduler(object):
 					   (interval.minutes * 60) +\
 					   (interval.seconds)
 			time.sleep(interval_seconds)
-			
-			# Get the matches, and run the scheduler on them.
-			self.cache = self.get_matches(self.url)
+                        
+                        # Get the matches, and run the scheduler on them.
+                        while not self.cache:
+                            try:
+                                self.cache = self.get_matches()
+                            except IndexError as ie:
+                                print str(ie)
+                                time.sleep(POLL_INTERVAL)
 			while self.cache:
 				try:
 					self._run_scheduler()
@@ -73,6 +78,7 @@ class Scheduler(object):
 				
 				time.sleep(POLL_INTERVAL)
 
+                        '''
 			# Determine the amount of time until midnight (in seconds),
 			# and then sleep  until then before restarting the cycle.
 			minutes_left = (datetime.now().hour * 60) + datetime.now().minute
@@ -81,35 +87,118 @@ class Scheduler(object):
 			print 'cycle complete.'
 			print 'sleeping for ', time_to_midnight / 60, ' minutes.'
 			time.sleep(time_to_midnight)
+                        '''	
+
+        ''' Get the time interval between today and the next match date. '''
+        def get_interval(self):
+
+            # Attempt to find the next match date. If no matches are found on the
+            # given URL, then we'll need to iteratively search the next valid URL/s.
+            n_match_date = None
+            while not n_match_date:
+                    n_match_date = self._next_match_date()
+                    if not n_match_date:
+                            self.url = self._get_next_url()
+
+            # Return the time interval until our next match.
+            return self.get_time_until(n_match_date)
+
+	''' Return the next match date from the scheduler's current URL. '''
+        def _next_match_date(self):
+		
+		request = requests.get(self.url)
+		tree = html.fromstring(request.content)
 	
+		# Get the dates and times for all games on the next match day.
+		dates	 = tree.xpath('//span[@class="game-date"]')
+		times	 = tree.xpath('//span[@class="game-time"]')
+		dts	 = [
+				[date.text_content(), date_parser.parse(_time.text_content())]
+				for date, _time in zip(dates, times)
+				if _time != 'FT'
+		]
+		
+                # Return the first match on the next match date if one is found.
+                if dts:
+                        match_date = min(dts, key=itemgetter(1))
+                else:
+                        match_date = None
+
+                return match_date
+
+        ''' Returns the URL for the next possible match date. '''
+        def _get_next_url(self):
+
+            # Get tomorrows date.
+            today = datetime.today(); time_diff = timedelta(days=+1)
+            next_date = today + time_diff
+
+            next_month = next_date.month; next_day = next_date.day; 
+            
+            # ESPN date values have a '0' prepended to any single digit values.
+            _formatter = lambda t: '0{}'.format(t) if t < 10 else t
+            url = (self.url + '?date={}{}{}').\
+                  format(next_date.year, _formatter(next_month), _formatter(next_day))
+            
+            return url
+
+	''' Returns a relativedelta object which represents the amount of time
+	    until the given match date and time.
+	    Args:
+	    	next_match: A tuple containing the date and time of the next match.
+	'''
+	def get_time_until(self, next_match):
+
+		date, time = next_match[0], next_match[1]
+
+		# Get the number of months and days until the match.
+		date  = date.split('/')
+		month = int(date[1])
+		day   = int(date[0])
+		
+		# Set the month and day. We then calculate the time delta until
+		# the next match.
+		time = time.replace(month=month, day=day)
+		delta = dateutil.relativedelta.relativedelta(time, datetime.now())
+		
+		# Set the timezone to EST, and account for hours before.
+                # TODO: Refactor.
+                EST_BST_TIME_DIFF = 5
+		delta.hours -= EST_BST_TIME_DIFF + self.hours_before
+		
+                return delta
+
 	''' Run the scheduler and determine which operation to perform. If a match
 	    thread exists, and is active, then we update it. If it exists and is 
 	    not active then we remove it. If no match thread exists then we create one.
 	'''
 	def _run_scheduler(self):
 		
+	        print
 		# Cycle through the cache and perform the appropriate action.
 		for match in self.cache:
 			print match.home_team['name'], ' vs ', match.away_team['name']
-			if match.is_posted and match.is_active:
-				match.update_thread()
-				print 'updating ', match
-			elif match.is_posted and (not match.is_active):
-				print 'removing ', match
-				self.cache.remove(match)
-			elif self.is_ready(match) and (not match.is_posted):
-				match.post_thread(target_sub=self.target_sub)
-				print 'posting ', match
-			else:
-				print 'no action'
-			print
-		
+                        try:
+                            if match.is_posted and match.is_active:
+                                    match.update_thread()
+                                    print 'updating ', match
+                            elif match.is_posted and (not match.is_active):
+                                    print 'removing ', match
+                                    self.cache.remove(match)
+                            elif self.is_ready(match) and (not match.is_posted):
+                                    print self.is_ready(match)
+                                    match.post_thread(target_sub=self.target_sub)
+                                    print 'posting ', match
+                            else:
+                                    print 'no action'
+                        except Exception as rs:
+                            print 'scheduler error: ', str(rs)
+
 	''' Returns a list of Match objects that are not currently in the
-	    scheduler's cache.
-	'''
-	def get_matches(self, url):
+	    scheduler's cache. '''
+	def get_matches(self):
 		
-		request = requests.get(url)
+		request = requests.get(self.url)
 		tree = html.fromstring(request.content)
 
 		# Get the relative match URLs, and create full URLs. If the URL
@@ -126,7 +215,7 @@ class Scheduler(object):
 				matches.append(Match(self.base_url + match.get('href')))
 		
 		matches = [match for match in matches
-			   if match.competition.lower().find('super rugby') != -1]
+			  if match.competition.lower().find('super rugby') != -1]
 		
 		return matches
 	
@@ -135,64 +224,22 @@ class Scheduler(object):
 
 		EST_BST_TIME_DIFF = 5
 		match_time = date_parser.parse(match.kickoff_time)
-		
-		TIME_DIFF = match_time.hour - EST_BST_TIME_DIFF
-		match_time = match_time.replace(hour=TIME_DIFF)
-		
-		# Find the number of minutes until the match. If this is less than the
+                
+                # Format the game's date.
+                date = date_parser.parse(match.date)
+                day   = date.day
+                month = date.month
+                
+                # Account for the time difference, and set the datetime fields.
+                TIME_DIFF = match_time.hour - EST_BST_TIME_DIFF
+		match_time = match_time.replace(hour=TIME_DIFF, month=month, day=day)
+                
+                # Find the number of minutes until the match. If this is less than the
 		# given 'hours_before' arg, then the match is ready to be posted.
 		delta = dateutil.relativedelta.relativedelta(match_time, datetime.now())
 		delta_minutes = (delta.hours * 60) + (delta.minutes)
-		
-		return delta_minutes <= (self.hours_before * 60)
-
-	''' Get the next interval to run on. '''
-	def get_interval(self):
-		
-		request = requests.get(self.url)
-		tree = html.fromstring(request.content)
-	
-		# Get the dates and times for all games on the next match day.
-		dates	 = tree.xpath('//span[@class="game-date"]')
-		times	 = tree.xpath('//span[@class="game-time"]')
-		dts	 = [
-				[date.text_content(), date_parser.parse(time.text_content())]
-				for date, time in zip(dates, times)
-				if time != 'FT'
-		]
-		
-		# If no games are scheduled then we return an empty relativedelta.
-		if not dts: return dateutil.relativedelta.relativedelta()
-
-		# Get the time of the next match.
-		next_match = min(dts, key=itemgetter(1))
-		
-		return self.get_time_until(next_match)
-
-	''' Returns a relativedelta object which represents the amount of time
-	    until the given match date and time.
-	    Args:
-	    	next_match: A tuple containing the date and time of the next match.
-	'''
-	def get_time_until(self, next_match):
-
-		date, time = next_match[0], next_match[1]
-
-		# Get the number of months and days until the match.
-		date = date.split('/')
-		month = int(date[1])
-		day   = int(date[0])
-		
-		# Set the month and day. We then calculate the time delta until
-		# the next match.
-		time = time.replace(month=month, day=day)
-		delta = dateutil.relativedelta.relativedelta(time, datetime.now())
-		
-		# Set the timezone to EST, and account for hours before.
-		EST_BST_TIME_DIFF = 5
-		delta.hours 	 -= EST_BST_TIME_DIFF + self.hours_before
-
-		return delta
+                
+                return delta_minutes <= (self.hours_before * 60)
 
 
 '''   Represents a rugby union match. '''
@@ -207,6 +254,7 @@ class Match(object):
 		self.competition  = None
 		self.venue 	  = None
 		self.kickoff_time = None
+                self.date         = None
                 self.game_time    = None
 		self.key_events	  = None
 		self.post 	  = None
@@ -218,6 +266,8 @@ class Match(object):
 		# Monitors the status of the game.
 		self.is_posted	 = False
 		self.is_active	 = False
+                self.is_ft       = False
+                self.is_over     = False
 
                 # Initialize static fields, and get current dynamic fields.
 		self.setup_gamethread()
@@ -285,7 +335,8 @@ class Match(object):
 		self.thread['header'] = self.format_header()
 
 		# If the game is over, then we need to set our is_active flag accordingly.
-		if self.game_time == 'FT': self.is_active = False
+		if self.game_time == 'FT':
+                    self.is_ft = True
 		
 		'''
 		# Get the try info (scorers and try time).
@@ -301,8 +352,11 @@ class Match(object):
 		# Get the current events tree.
 		self.events = self.get_events(tree)
 		self.thread['events'] = self.format_events()
-		
-		# Perform the update.
+                
+                if self.is_ft and self.is_over:
+                    self.is_active = False
+
+                # Perform the update.
 		self.post = self.post.edit(
 				body=self.thread['header'] + self.thread['lineups'] + \
 				     self.thread['events']
@@ -360,23 +414,25 @@ class Match(object):
 	def format_events(self):
 
 		event_flairs = {
-				'Red card': '[](#redcard)',
-				'Yellow card': '[](#yellowcard)',
-				'Substitute': '[](#sub)', 'substituted': '[](#sub)',
-				'Try': '[](#try)',
-				'Conversion': '[](#conv)',
-				'Penalty': '[](#pen)',
-				'Drop': '[](#drop)'
+				'red card': '[](#red)',
+				'yellow card': '[](#yellow)',
+				'substitute': '[](#sub)', 'substituted': '[](#sub)',
+				'try': '[](#try)',
+				'conversion': '[](#conv)',
+				'penalty': '[](#pen)',
+				'drop': '[](#drop)'
 		}
 		
-		key_events = ['Red Card', 'Yellow Card', 'Try', 'Conversion', 'Penalty']
+		key_events = ['red card', 'yellow card', 'try', 'conversion', 'penalty']
 		events = "## **Match Events**:\n"
 		for event in self.events:
+                        if event[1].lower().find('end of second half') != -1:
+                            self.is_over = True
 			
-			# Check for a flair.
+                        # Check for a flair.
 			flair = [
 					f for f in event_flairs.keys()
-					if f in event[1].split()
+					if event[1].lower().find(f) != -1
 			]
 			
 			# Prepend the flair markdown. Bold the event if necessary.
@@ -386,8 +442,16 @@ class Match(object):
 				
 				event[1] = event_flairs[flair[0]] + ' ' + event[1]
 			
-			events += '\n\n**' + event[0] + "'**  " + event[1]
-
+                        # Format stoppage time text.
+                        '''
+                        if event[1][0] == '+' and \
+                           event[1].lower().find('end of first half') == -1:
+                            prefix = event[1].split(str(self.home_team['score']))[0]
+                            event[1] = prefix + ' ' + str(self.home_team['score']) + \
+                                       event[1].split(str(self.home_team['score']))[1]
+			'''
+                        events += '\n\n**' + event[0] + "'**  " + event[1]
+                
 		return events
 
         ''' Parse the website linked via the 'url' parameter, and return all
@@ -408,9 +472,12 @@ class Match(object):
 	 	venue = tree.xpath('//div[@class="game-details location-details"]')[0]
 		self.venue = venue.text_content().split(':')[1]
 
-		kickoff = tree.xpath('//div[@class="game-date-time"]')[0]
-		self.kickoff_time = kickoff.text_content().split(',')[0]
-               
+		# Get the game's kickoff time, and date.
+                game_time_details = tree.xpath('//div[@class="game-date-time"]')[0]
+                game_time_details = game_time_details.text_content().split(',')
+                self.kickoff_time = game_time_details[0]
+                self.date    = game_time_details[1]
+
 		# Get the team names, their flare, and their current score.
                 h_team  = tree.xpath('//*[@id="custom-nav"]/header/div[2]'
                                      '/div[1]/div/div[2]/div/div/a/span[2]')[0]
@@ -486,7 +553,7 @@ class Match(object):
 				# Super Rugby:
 				'waikato-chiefs': '[](#waikato-chiefs)',
 				'jaguares': '[](#jaguares)', 'stormers': '[](#stormers)',
-				'brumbies': '[](#brumbles)', 'crusaders': '[](#crusaders)',
+				'brumbies': '[](#brumbies)', 'crusaders': '[](#crusaders)',
 				'hurricanes': '[](#hurricanes)', 'lions': '[](#lions)',
 				'blues': '[](#blues)', 'sharks': '[](#sharks)',
  				'cheetahs': '[](#cheetahs)', 'reds': '[](#reds)',
@@ -624,9 +691,6 @@ class Match(object):
 
 # ========================================================================
 
-USER_AGENT    = 'RugbyUnionBot'
-USERNAME      = 'RugbyUnionBot'
-
 r = praw.Reddit(client_id=CLIENT_ID,
 		client_secret=CLIENT_SECRET,
 		user_agent=USER_AGENT,
@@ -641,11 +705,8 @@ POLL_INTERVAL  = 30
 HOURS_BEFORE   = 2
 
 if __name__=='__main__':
-        
-	scheduler = Scheduler(url=URL, subreddit_name=SUBREDDIT_NAME,
+
+        scheduler = Scheduler(url=URL, subreddit_name=SUBREDDIT_NAME,
 			      cache_size=CACHE_SIZE, hours_before=HOURS_BEFORE)
-	#u = 'http://www.espn.co.uk/rugby/match?gameId=290105&league=267979'
-	#m = Match(u)
-	#m.update_thread()
 	scheduler.run_scheduler(POLL_INTERVAL)
 
