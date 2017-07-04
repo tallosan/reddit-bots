@@ -35,8 +35,10 @@ class Scheduler(object):
 		
 		self.base_url 	   = url
 		self.url 	   = self.base_url + '/rugby/scoreboard'
+		self.base 	   = self.base_url + '/rugby/scoreboard'
 		self.target_sub	   = r.subreddit(subreddit_name)
-
+ 		
+		self.date	   = datetime.today(); 
 		self.cache	   = deque(maxlen=cache_size)
 		self.hours_before  = hours_before
 
@@ -50,7 +52,7 @@ class Scheduler(object):
 		# We run in intervals. Sleep until the first match, then run until
 		# all matches have completed. Then sleep again until midnight & repeat.
 		while True:
-		        interval = self.get_interval()
+		        interval = self._get_interval()
 			print 'sleeping for ', interval.days, ' days, ',\
 				interval.hours, ' hours and ',\
 				interval.minutes, ' minutes.'
@@ -66,7 +68,7 @@ class Scheduler(object):
                         # Get the matches, and run the scheduler on them.
                         while not self.cache:
                             try:
-                                self.cache = self.get_matches()
+                                self.cache = self._get_matches()
                             except IndexError as ie:
                                 print str(ie)
                                 time.sleep(POLL_INTERVAL)
@@ -77,20 +79,9 @@ class Scheduler(object):
 					print str(exc)
 				
 				time.sleep(POLL_INTERVAL)
-
-                        '''
-			# Determine the amount of time until midnight (in seconds),
-			# and then sleep  until then before restarting the cycle.
-			minutes_left = (datetime.now().hour * 60) + datetime.now().minute
-			time_to_midnight = ((24 * 60) - minutes_left) * 60
-
-			print 'cycle complete.'
-			print 'sleeping for ', time_to_midnight / 60, ' minutes.'
-			time.sleep(time_to_midnight)
-                        '''	
-
-        ''' Get the time interval between today and the next match date. '''
-        def get_interval(self):
+        
+	''' Get the time interval between today and the next match date. '''
+        def _get_interval(self):
 
             # Attempt to find the next match date. If no matches are found on the
             # given URL, then we'll need to iteratively search the next valid URL/s.
@@ -101,21 +92,31 @@ class Scheduler(object):
                             self.url = self._get_next_url()
 
             # Return the time interval until our next match.
-            return self.get_time_until(n_match_date)
+            return self.__get_time_until(n_match_date)
 
-	''' Return the next match date from the scheduler's current URL. '''
+	''' Return the next match date from the scheduler's current URL.
+	    Note, this looks awfully similar to _get_matches(). Unfortunately,
+	    the ESPN page doesn't load all of the necessary data to initialize
+	    a Match object until a little before the match starts, so we have no
+	    choice but to duplicate some code unless we want to refactor a lot. 
+	    Maybe something for the future. '''
         def _next_match_date(self):
 		
 		request = requests.get(self.url)
 		tree = html.fromstring(request.content)
-	
+		
+		# Ensure that the competitions we're looking for have matches.
+		comps = tree.xpath("//*[@class='date-heading js-show']")
+		if not any(comp.text_content().lower() == 'super rugby' for comp in comps):
+			return None
+
 		# Get the dates and times for all games on the next match day.
-		dates	 = tree.xpath('//span[@class="game-date"]')
-		times	 = tree.xpath('//span[@class="game-time"]')
-		dts	 = [
-				[date.text_content(), date_parser.parse(_time.text_content())]
-				for date, _time in zip(dates, times)
-				if _time != 'FT'
+		dates = tree.xpath('//span[@class="game-date"]')
+		times = tree.xpath('//span[@class="game-time"]')
+		dts   = [
+		  	  [date.text_content(), date_parser.parse(_time.text_content())]
+			  for date, _time in zip(dates, times)
+			  if _time != 'FT'
 		]
 		
                 # Return the first match on the next match date if one is found.
@@ -125,47 +126,48 @@ class Scheduler(object):
                         match_date = None
 
                 return match_date
-
+	
         ''' Returns the URL for the next possible match date. '''
         def _get_next_url(self):
 
             # Get tomorrows date.
-            today = datetime.today(); time_diff = timedelta(days=+1)
-            next_date = today + time_diff
+            time_diff = timedelta(days=+1)
+	    self.date += time_diff
 
-            next_month = next_date.month; next_day = next_date.day; 
+            next_month = self.date.month; next_day = self.date.day; 
             
             # ESPN date values have a '0' prepended to any single digit values.
             _formatter = lambda t: '0{}'.format(t) if t < 10 else t
-            url = (self.url + '?date={}{}{}').\
-                  format(next_date.year, _formatter(next_month), _formatter(next_day))
+            url = (self.base + '?date={}{}{}').\
+                  format(self.date.year, _formatter(next_month), _formatter(next_day))
             
-            return url
+	    return url
 
 	''' Returns a relativedelta object which represents the amount of time
 	    until the given match date and time.
 	    Args:
 	    	next_match: A tuple containing the date and time of the next match.
 	'''
-	def get_time_until(self, next_match):
+	def __get_time_until(self, next_match):
 
 		date, time = next_match[0], next_match[1]
 
 		# Get the number of months and days until the match.
-		date  = date.split('/')
-		month = int(date[1])
-		day   = int(date[0])
+		date  = date.split('/'); month = int(date[1]); day = int(date[0])
 		
 		# Set the month and day. We then calculate the time delta until
 		# the next match.
 		time = time.replace(month=month, day=day)
 		delta = dateutil.relativedelta.relativedelta(time, datetime.now())
-		
+
 		# Set the timezone to EST, and account for hours before.
-                # TODO: Refactor.
-                EST_BST_TIME_DIFF = 5
-		delta.hours -= EST_BST_TIME_DIFF + self.hours_before
+                EST_BST_TIME_DIFF = 5;
+		time_diff = dateutil.relativedelta.relativedelta(
+				hours=(EST_BST_TIME_DIFF + self.hours_before)
+		)
 		
+		delta -= time_diff
+
                 return delta
 
 	''' Run the scheduler and determine which operation to perform. If a match
@@ -185,8 +187,8 @@ class Scheduler(object):
                             elif match.is_posted and (not match.is_active):
                                     print 'removing ', match
                                     self.cache.remove(match)
-                            elif self.is_ready(match) and (not match.is_posted):
-                                    print self.is_ready(match)
+                            elif self._is_ready(match) and (not match.is_posted):
+                                    print self._is_ready(match)
                                     match.post_thread(target_sub=self.target_sub)
                                     print 'posting ', match
                             else:
@@ -196,7 +198,7 @@ class Scheduler(object):
 
 	''' Returns a list of Match objects that are not currently in the
 	    scheduler's cache. '''
-	def get_matches(self):
+	def _get_matches(self):
 		
 		request = requests.get(self.url)
 		tree = html.fromstring(request.content)
@@ -220,7 +222,7 @@ class Scheduler(object):
 		return matches
 	
 	''' Determines if the match is ready to be posted. '''
-	def is_ready(self, match):
+	def _is_ready(self, match):
 
 		EST_BST_TIME_DIFF = 5
 		match_time = date_parser.parse(match.kickoff_time)
@@ -282,10 +284,10 @@ class Match(object):
 		self.thread['title'] = "Match Thread: " + \
 				self.home_team['name'] + ' vs ' +  \
 				self.away_team['name'] + ' [' + self.competition + '] ' +\
-				self.format_timezones()
+				self._format_timezones()
 
 		# Title / Header.
-		self.thread['header'] = self.format_header()
+		self.thread['header'] = self._format_header()
 		
 		# TODO: Post scorers.
 		#thread += ', '.join([' '.join(_try) for _try in self.home_team['tries']])
@@ -330,9 +332,9 @@ class Match(object):
                 tree = html.fromstring(request.content)
 
 		# Get the current score, and the game time.
-		self.home_team['score'], self.away_team['score'] = self.get_score(tree)
-		self.game_time = self.get_time(tree)
-		self.thread['header'] = self.format_header()
+		self.home_team['score'], self.away_team['score'] = self._get_score(tree)
+		self.game_time = self._get_time(tree)
+		self.thread['header'] = self._format_header()
 
 		# If the game is over, then we need to set our is_active flag accordingly.
 		if self.game_time == 'FT':
@@ -345,13 +347,13 @@ class Match(object):
                 a_tries = tree.xpath('//*[@id="custom-nav"]/div[1]/div/div/'
                                        'div[2]/div')[0]
 
-                self.home_team['tries'] = self.get_tries(h_tries)
-                self.away_team['tries'] = self.get_tries(a_tries)
+                self.home_team['tries'] = self._get_tries(h_tries)
+                self.away_team['tries'] = self._get_tries(a_tries)
 		'''
 
 		# Get the current events tree.
-		self.events = self.get_events(tree)
-		self.thread['events'] = self.format_events()
+		self.events = self._get_events(tree)
+		self.thread['events'] = self._format_events()
                 
                 if self.is_ft and self.is_over:
                     self.is_active = False
@@ -363,7 +365,7 @@ class Match(object):
 		)
 
 	''' Format the kick off times into different timezones. '''
-	def format_timezones(self):
+	def _format_timezones(self):
 
 		bst = date_parser.parse(self.kickoff_time)
 		nz  = bst.replace(hour=(bst.hour + 11) % 24)
@@ -390,7 +392,7 @@ class Match(object):
 		return ', '.join(timezones)
 
 	''' Format the thread header using Markdown syntax. '''
-	def format_header(self):
+	def _format_header(self):
 		
 		# If the game is active then we'll use a different delimiter.
 		DELIM = ' - '
@@ -411,7 +413,7 @@ class Match(object):
 		return header
 
 	''' Format the match events using Markdown syntax. '''
-	def format_events(self):
+	def _format_events(self):
 
 		event_flairs = {
 				'red card': '[](#red)',
@@ -487,13 +489,13 @@ class Match(object):
 		self.home_team['name']  = h_team.text_content()
                 self.away_team['name']  = a_team.text_content()
 		
-		self.home_team['flair'] = self.get_flair(self.home_team['name'])
-		self.away_team['flair'] = self.get_flair(self.away_team['name'])
+		self.home_team['flair'] = self._get_flair(self.home_team['name'])
+		self.away_team['flair'] = self._get_flair(self.away_team['name'])
 		
-		self.home_team['score'], self.away_team['score'] = self.get_score(tree)
+		self.home_team['score'], self.away_team['score'] = self._get_score(tree)
 
                 # Get the current game time.
-		self.game_time = self.get_time(tree)
+		self.game_time = self._get_time(tree)
 		
 		# Get the team lineups (starters & subs).
                 h_lineup = tree.xpath('//*[@id="main-container"]/div/div/div[1]/'
@@ -505,16 +507,16 @@ class Match(object):
 		a_subs	 = tree.xpath('//*[@id="main-container"]/div/div/div[1]/'
 				'article[1]/div/div[2]/div/div/div/table/tbody[2]')[0]
 
-                self.home_team['starters'] = self.get_lineup(h_lineup)
-                self.home_team['subs'] 	   = self.get_lineup(h_subs)
-		self.away_team['starters'] = self.get_lineup(a_lineup)
-		self.away_team['subs']	   = self.get_lineup(a_subs)
+                self.home_team['starters'] = self._get_lineup(h_lineup)
+                self.home_team['subs'] 	   = self._get_lineup(h_subs)
+		self.away_team['starters'] = self._get_lineup(a_lineup)
+		self.away_team['subs']	   = self._get_lineup(a_subs)
 
 	''' Returns the flair markdown for the given team.
 	    Args:
 	    	name: The name of the team.
 	'''
-	def get_flair(self, name):
+	def _get_flair(self, name):
 		
 		# Team flairs.
 		flairs = {
@@ -597,7 +599,7 @@ class Match(object):
 	    Args:
 	    	tree: The HTML document tree.
 	'''
-	def get_score(self, tree):
+	def _get_score(self, tree):
      		
 		h_score = tree.xpath('//*[@id="custom-nav"]/header/div[2]'
                                      '/div[1]/div/div[3]/div')[0]
@@ -610,7 +612,7 @@ class Match(object):
 	    Args:
 		tree: The HTML document tree.
 	'''
-	def get_time(self, tree):
+	def _get_time(self, tree):
  
 		time = tree.xpath('//*[@id="custom-nav"]/header/div[2]/div[2]/span[3]')[0]
                 return time.text_content()
@@ -620,7 +622,7 @@ class Match(object):
             Args:
                 e_tries: An HtmlElement containing the match's try data.
         '''
-        def get_tries(self, try_element):
+        def _get_tries(self, try_element):
 
                 tries = []
                 for _try in try_element.text_content().split(')')[:-1]:
@@ -635,7 +637,7 @@ class Match(object):
             Args:
                 lineup_element: An HtmlElement containing the lineup data.
         '''
-        def get_lineup(self, lineup_element):
+        def _get_lineup(self, lineup_element):
 
                 # Go through each row and extract the player data. N.B. -- Sometimes
 		# ESPN will screw up the lineup formatting, so we'll need to handle this.
@@ -665,7 +667,7 @@ class Match(object):
 	    Args:
 		    events_url: The URL to the match's commentary page.
 	'''
-	def get_events(self, tree):
+	def _get_events(self, tree):
 		
 		# Get the URL of the events page. N.B. -- The XPath of this element
 		# changes from time to  time, so we need to handle this.
