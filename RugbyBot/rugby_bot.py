@@ -17,7 +17,6 @@ import dateutil
 import dateutil.parser as date_parser
 
 from operator import itemgetter
-
 from collections import deque
 
 
@@ -38,7 +37,7 @@ class Scheduler(object):
 		self.base 	   = self.base_url + '/rugby/scoreboard'
 		self.target_sub	   = r.subreddit(subreddit_name)
  		
-		self.date	   = datetime.today(); 
+		self.date	   = datetime.today()
 		self.cache	   = deque(maxlen=cache_size)
 		self.hours_before  = hours_before
 
@@ -74,9 +73,9 @@ class Scheduler(object):
                                 time.sleep(POLL_INTERVAL)
 			while self.cache:
 				try:
-					self._run_scheduler()
+				    self._run_scheduler()
 				except Exception as exc:
-					print str(exc)
+				    print str(exc)
 				
 				time.sleep(POLL_INTERVAL)
         
@@ -92,7 +91,7 @@ class Scheduler(object):
                             self.url = self._get_next_url()
 
             # Return the time interval until our next match.
-            return self.__get_time_until(n_match_date)
+            return self._get_time_until(n_match_date)
 
 	''' Return the next match date from the scheduler's current URL.
 	    Note, this looks awfully similar to _get_matches(). Unfortunately,
@@ -109,17 +108,25 @@ class Scheduler(object):
 		comps = tree.xpath("//*[@class='date-heading js-show']")
 		if not any(comp.text_content().lower() == 'super rugby' for comp in comps):
 			return None
-
-		# Get the dates and times for all games on the next match day.
-		dates = tree.xpath('//span[@class="game-date"]')
-		times = tree.xpath('//span[@class="game-time"]')
-		dts   = [
-		  	  [date.text_content(), date_parser.parse(_time.text_content())]
-			  for date, _time in zip(dates, times)
-			  if _time != 'FT'
-		]
 		
-                # Return the first match on the next match date if one is found.
+		# Get the dates and times for all games on the next match day.
+		dates = []; times = []
+		for e in tree.xpath('//div[@class="game-status"]'):
+		    if e.xpath('span[@class="game-date"]') and e.xpath('span[@class="game-time"]'):
+		            date = e.xpath('span[@class="game-date"]')[0]
+		            time = e.xpath('span[@class="game-time"]')[0]
+			    dates.append(date); times.append(time)
+		
+		# Get all valid date-time pairs.
+		dts   = [
+		  	  [_date.text_content(), date_parser.parse(_time.text_content())]
+			  for _date, _time in zip(dates, times)
+			  if _time.text_content().lower() != 'ft'
+			  and _time.xpath('../../../../../../../../a/h2')[0].\
+			            text_content().lower() == 'super rugby'
+		]
+                
+		# Return the first match on the next match date if one is found.
                 if dts:
                         match_date = min(dts, key=itemgetter(1))
                 else:
@@ -134,7 +141,7 @@ class Scheduler(object):
             time_diff = timedelta(days=+1)
 	    self.date += time_diff
 
-            next_month = self.date.month; next_day = self.date.day; 
+            next_month = self.date.month; next_day = self.date.day
             
             # ESPN date values have a '0' prepended to any single digit values.
             _formatter = lambda t: '0{}'.format(t) if t < 10 else t
@@ -148,10 +155,10 @@ class Scheduler(object):
 	    Args:
 	    	next_match: A tuple containing the date and time of the next match.
 	'''
-	def __get_time_until(self, next_match):
-
+	def _get_time_until(self, next_match):
+		
 		date, time = next_match[0], next_match[1]
-
+		
 		# Get the number of months and days until the match.
 		date  = date.split('/'); month = int(date[1]); day = int(date[0])
 		
@@ -161,14 +168,17 @@ class Scheduler(object):
 		delta = dateutil.relativedelta.relativedelta(time, datetime.now())
 
 		# Set the timezone to EST, and account for hours before.
-                EST_BST_TIME_DIFF = 5;
+                EST_BST_TIME_DIFF = 5
 		time_diff = dateutil.relativedelta.relativedelta(
 				hours=(EST_BST_TIME_DIFF + self.hours_before)
 		)
-		
 		delta -= time_diff
-
-                return delta
+		
+		# Handle hour overflow.
+		if delta.hours < 0:
+			delta.hours = 24 + delta.hours; delta.days -= 1
+                
+		return delta
 
 	''' Run the scheduler and determine which operation to perform. If a match
 	    thread exists, and is active, then we update it. If it exists and is 
@@ -213,8 +223,11 @@ class Scheduler(object):
 		for match in schedule:
 			match_url = self.base_url + match.get('href')
 			print 'getting ', match_url
-			if not any((match.url == match_url) for match in self.cache):
-				matches.append(Match(self.base_url + match.get('href')))
+			try:
+			    if not any((match.url == match_url) for match in self.cache):
+			        matches.append(Match(self.base_url + match.get('href')))
+			except IndexError:
+			    pass
 		
 		matches = [match for match in matches
 			  if match.competition.lower().find('super rugby') != -1]
@@ -261,15 +274,15 @@ class Match(object):
 		self.key_events	  = None
 		self.post 	  = None
 		
-		self.thread 	 = {}
-                self.home_team   = {}
-                self.away_team   = {}
+		self.thread    = {}
+                self.home_team = {}
+                self.away_team = {}
 
 		# Monitors the status of the game.
-		self.is_posted	 = False
-		self.is_active	 = False
-                self.is_ft       = False
-                self.is_over     = False
+		self.is_posted = False
+		self.is_active = False
+                self.is_ft     = False
+                self.is_over   = False
 
                 # Initialize static fields, and get current dynamic fields.
 		self.setup_gamethread()
@@ -470,7 +483,7 @@ class Match(object):
                 # Get the competition and venue names.
                 competition = tree.xpath('//*[@id="custom-nav"]/header/div[1]')[0]
                 self.competition = competition.text_content()
-
+	 
 	 	venue = tree.xpath('//div[@class="game-details location-details"]')[0]
 		self.venue = venue.text_content().split(':')[1]
 
@@ -478,7 +491,7 @@ class Match(object):
                 game_time_details = tree.xpath('//div[@class="game-date-time"]')[0]
                 game_time_details = game_time_details.text_content().split(',')
                 self.kickoff_time = game_time_details[0]
-                self.date    = game_time_details[1]
+                self.date    	  = game_time_details[1]
 
 		# Get the team names, their flare, and their current score.
                 h_team  = tree.xpath('//*[@id="custom-nav"]/header/div[2]'
